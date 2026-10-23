@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 import pymupdf
 
-# Matches section numbering like "1.", "1.2", "2.1.1.1", followed by a title
+# Regex to match numbered headings like "1.", "1.2", "2.1.1.1" with a title
 HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+(.+?)$")
 
 @dataclass
@@ -21,36 +21,36 @@ class ParsedNode:
     page: int
 
 def normalize_text(text: str) -> str:
-    """Cleans up raw PDF text strings. Handles typographic ligatures ('fi', 'fl'),
-    standardizes various Unicode hyphens and quotes, and trims trailing whitespace."""
+    # Decompose ligatures like \ufb01 ("fi") and \ufb02 ("fl").
+    # Windows CP1252 terminal crashes on \ufb01 unless normalized.
     if not text:
         return ""
-    # Decompose ligatures like \ufb01 -> 'fi'
     norm = unicodedata.normalize("NFKD", text)
-    # Map special dashes and quotes to standard ASCII equivalents
+    # Convert special dashes and quotes to standard ASCII equivalents
     norm = norm.replace("\u2010", "-").replace("\u2011", "-").replace("\u2012", "-")
     norm = norm.replace("\u2013", "-").replace("\u2014", "-")
     norm = norm.replace("\u2018", "'").replace("\u2019", "'")
     norm = norm.replace("\u201c", '"').replace("\u201d", '"')
     norm = norm.replace("\u00a0", " ")
-    # Strip non-printable control characters
+    # Strip weird control characters
     norm = "".join(ch for ch in norm if ch == "\n" or unicodedata.category(ch)[0] != "C")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in norm.splitlines()]
     return "\n".join(line for line in lines if line)
 
 def clean_for_hash(text: str) -> str:
-    """Collapses line-breaks and whitespace into single spaces so pagination shifts
-    across document revisions do not cause false-positive diff changes."""
+    # Collapse all whitespace runs and linebreaks into single spaces.
+    # When section 5.3 is added in v2, subsequent sections shift to new pages;
+    # collapsing whitespace prevents line-wrap shifts from causing false diffs.
     norm = normalize_text(text)
     return " ".join(norm.split())
 
 def digest(text: str) -> str:
-    """Computes a SHA-256 hash over the canonical text string."""
+    # Canonical SHA-256 hash of normalized text
     canonical = clean_for_hash(text)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 def is_rect_overlap(r1, r2) -> bool:
-    """Helper to detect if a text block falls inside an extracted table bounding box."""
+    # Check if a text block overlaps with a detected table bbox (>50% area)
     x_overlap = max(0, min(r1[2], r2[2]) - max(r1[0], r2[0]))
     y_overlap = max(0, min(r1[3], r2[3]) - max(r1[1], r2[1]))
     overlap_area = x_overlap * y_overlap
@@ -58,7 +58,7 @@ def is_rect_overlap(r1, r2) -> bool:
     return (r1_area > 0 and (overlap_area / r1_area) > 0.5)
 
 def format_table_as_markdown(table_data: list[list[str | None]]) -> str:
-    """Converts a raw matrix from PyMuPDF table finder into a clean Markdown table."""
+    # Convert PyMuPDF table matrix to clean GitHub Flavored Markdown
     cleaned_rows: list[list[str]] = []
     for row in table_data:
         cleaned_row = [re.sub(r"\s+", " ", normalize_text(cell or "")).strip() for cell in row]
@@ -79,9 +79,8 @@ def format_table_as_markdown(table_data: list[list[str | None]]) -> str:
     return "\n".join(lines)
 
 def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
-    """Extracts hierarchical sections, headings, tables, and paragraphs from the PDF.
-    Uses typography metadata (font size, bold weight) to avoid mistaking numbered
-    list items for headings."""
+    # Extracts sections, headings, tables, and paragraphs from the PDF.
+    # Uses font size and boldness flags to avoid mistaking numbered list items for headings.
     doc = pymupdf.open(path)
     nodes: list[ParsedNode] = []
     known_heading_keys: list[str] = []
@@ -94,7 +93,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
     for page_num in range(1, len(doc) + 1):
         page = doc[page_num - 1]
         
-        # Detect any tables on the current page first
+        # 1. Grab tables on this page first
         tab_finder = page.find_tables()
         table_rects = []
         page_items = []  # sorted by y0 to preserve natural top-to-bottom reading order
@@ -105,20 +104,20 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
             if md_table:
                 page_items.append((tab.bbox[1], "table", (tab.bbox, md_table)))
 
-        # Extract text blocks and collect typography details
+        # 2. Extract text blocks with font span details
         page_dict = page.get_text("dict")
         blocks = page_dict.get("blocks", [])
 
         for b in blocks:
             bbox = b.get("bbox", (0, 0, 0, 0))
-            # Skip blocks that overlap with tables so we don't duplicate text
+            # Don't duplicate text that's already inside a table
             if any(is_rect_overlap(bbox, tr) for tr in table_rects):
                 continue
             if "lines" not in b:
                 continue
             page_items.append((bbox[1], "block", b))
 
-        # Sort both text blocks and tables by vertical coordinate
+        # Sort everything on the page vertically
         page_items.sort(key=lambda item: item[0])
 
         for _, item_type, data in page_items:
@@ -165,7 +164,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                     flags = s.get("flags", 0)
                     if font_size > max_size:
                         max_size = font_size
-                    # Check if font indicates bold styling
+                    # Check for bold flags or font names
                     if "bold" in font_name or (flags & 2 != 0) or (flags & 16 != 0):
                         is_bold = True
 
@@ -183,16 +182,16 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 num_part = heading_match.group(1).rstrip(".")
                 title_part = heading_match.group(2).strip()
                 
-                # If there are sub-levels like 1.1, 2.1, 2.1.1.1, it's definitely a heading
+                # Multi-level numbers like 1.1, 2.1, 2.1.1.1 are definitely headings
                 if "." in num_part:
                     is_likely_heading = True
-                # If it's a single digit (like '1', '2'), verify it has bold styling or heading size
-                # to prevent list items (e.g. '1. Normal: systolic...') from being treated as chapters
+                # Single digit numbers (1., 2.) must be bold or >= 12pt to avoid
+                # treating page 3 clinical lists ('1. Normal: systolic...') as chapter headings!
                 elif is_bold or max_size >= 12.0:
                     if not (title_part.count(":") >= 1 and not is_bold and max_size < 12.0):
                         is_likely_heading = True
 
-            # Detect main document title on the first page
+            # Grab document title on page 1
             if page_num == 1 and max_size >= 20.0 and is_bold and not heading_match and not current_node:
                 title_key = "title"
                 title_node = ParsedNode(
@@ -214,7 +213,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 sec_title = heading_match.group(2).strip()
                 level = sec_number.count(".") + 1
                 
-                # Look up parent by walking backwards through known headings for nearest matching ancestor
+                # Backtrack through known headings to find nearest parent (handles 2.1.1.1 -> 2.1)
                 parent_key = None
                 parts = sec_number.split(".")
                 for cut in range(len(parts) - 1, 0, -1):
@@ -229,6 +228,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                         parent_key = matched_parent
                         break
 
+                # Disambiguate duplicate heading numbers if present
                 heading_counts[sec_number] += 1
                 final_node_key = sec_number if heading_counts[sec_number] == 1 else f"{sec_number}#{heading_counts[sec_number]}"
 
@@ -246,7 +246,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 known_heading_keys.append(final_node_key)
                 current_node = new_node
             else:
-                # Regular paragraph content
+                # Regular paragraph text
                 if current_node is None:
                     current_node = ParsedNode(
                         node_key="preamble",
@@ -260,7 +260,7 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                     )
                     nodes.append(current_node)
 
-                # Merge paragraph lines cleanly
+                # Append lines cleanly
                 if current_node.content:
                     if not current_node.content.endswith((".", ":", "!", "?", "\n")):
                         current_node.content += " " + block_text
