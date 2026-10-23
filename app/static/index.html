@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CT-200 Document Intelligence & QA Hub</title>
+  <meta name="description" content="Interactive Document Intelligence & QA Traceability Hub for technical device manuals. Ingest PDFs, inspect hierarchical trees, compare versions, and generate source-grounded test cases.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <!-- Top Navigation Bar -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-mark">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+      </div>
+      <div>
+        <h1 class="header-title">CT-200 Document Intelligence</h1>
+        <p class="header-subtitle">Hierarchy Extraction • Versioning • QA Traceability Hub</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-indicator">
+        <span class="pulse-dot"></span>
+        <span class="status-label">Backend Live (:8000)</span>
+      </div>
+      <a href="/docs" target="_blank" class="docs-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+        </svg>
+        Swagger Docs
+      </a>
+    </div>
+  </header>
+
+  <!-- Main Navigation Tabs -->
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-tab="upload-tab" id="tab-btn-upload">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="17 8 12 3 7 8"></polyline>
+        <line x1="12" y1="3" x2="12" y2="15"></line>
+      </svg>
+      Upload & Ingest PDF
+    </button>
+    <button class="nav-tab" data-tab="explorer-tab" id="tab-btn-explorer">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+        <polyline points="2 17 12 22 22 17"></polyline>
+        <polyline points="2 12 12 17 22 12"></polyline>
+      </svg>
+      Document Explorer & Filter
+    </button>
+    <button class="nav-tab" data-tab="diff-tab" id="tab-btn-diff">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="18" cy="18" r="3"></circle>
+        <circle cx="6" cy="6" r="3"></circle>
+        <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+        <line x1="6" y1="9" x2="6" y2="21"></line>
+      </svg>
+      Version Diff (v1 vs v2)
+    </button>
+    <button class="nav-tab" data-tab="qa-tab" id="tab-btn-qa">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+      </svg>
+      QA Generation & Staleness
+    </button>
+  </nav>
+
+  <!-- Container for Tab Contents -->
+  <main class="app-container">
+
+    <!-- 1. UPLOAD TAB -->
+    <section class="tab-pane active" id="upload-tab">
+      <div class="card upload-card">
+        <div class="card-header">
+          <h2>Upload Manual PDF</h2>
+          <p>Upload any version of the CT-200 manual or engineering document. Content will be parsed, versioned, and stored in the database.</p>
+        </div>
+        
+        <form id="upload-form" class="upload-dropzone">
+          <input type="file" id="file-input" accept="application/pdf" class="file-input-hidden">
+          <div class="dropzone-inner" id="dropzone-box">
+            <div class="dropzone-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+                <path d="M12 12v9"></path>
+                <path d="m16 16-4-4-4 4"></path>
+              </svg>
+            </div>
+            <p class="dropzone-text"><strong>Click to browse</strong> or drag and drop your PDF here</p>
+            <p class="dropzone-hint">Supports CT-200 v1, v2, or any technical specification PDF</p>
+            <div id="selected-file-label" class="selected-file-label"></div>
+          </div>
+
+          <div class="upload-actions">
+            <div class="form-group inline-group">
+              <label for="doc-key-input">Document Key:</label>
+              <input type="text" id="doc-key-input" value="ct200" placeholder="e.g. ct200" class="input-text">
+            </div>
+            <button type="submit" id="upload-btn" class="btn btn-primary" disabled>
+              <span class="btn-text">Ingest & Parse Document</span>
+              <span class="spinner hidden" id="upload-spinner"></span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Live Upload Result Panel -->
+      <div id="upload-result-container" class="card result-card hidden">
+        <div class="card-header flex-between">
+          <div>
+            <h3 id="upload-result-title">Upload Successful</h3>
+            <p id="upload-result-meta">Version details and extracted hierarchy</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="view-in-explorer-btn">
+            Open in Document Explorer →
+          </button>
+        </div>
+        
+        <div class="stats-grid" id="upload-stats-grid">
+          <div class="stat-box">
+            <span class="stat-label">Version ID</span>
+            <span class="stat-value" id="res-version-id">-</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Version Number</span>
+            <span class="stat-value" id="res-version-num">-</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Total Elements</span>
+            <span class="stat-value" id="res-node-count">-</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">SHA-256 Digest</span>
+            <span class="stat-value mono truncate" id="res-file-hash">-</span>
+          </div>
+        </div>
+
+        <div class="preview-section">
+          <h4>Parsed Nodes & Tables Preview</h4>
+          <div class="table-container">
+            <table class="data-table" id="upload-preview-table">
+              <thead>
+                <tr>
+                  <th>Section Key</th>
+                  <th>Type</th>
+                  <th>Page</th>
+                  <th>Title</th>
+                  <th>Content Preview</th>
+                </tr>
+              </thead>
+              <tbody id="upload-preview-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. EXPLORER & FILTER TAB -->
+    <section class="tab-pane" id="explorer-tab">
+      <!-- Top Filter & Search Bar -->
+      <div class="card filter-bar-card">
+        <div class="filter-controls">
+          <div class="filter-group">
+            <label for="explorer-version-select">Document Version:</label>
+            <select id="explorer-version-select" class="select-dropdown">
+              <option value="">Loading versions...</option>
+            </select>
+          </div>
+
+          <div class="filter-group search-group">
+            <label for="explorer-search-input">Search / Filter Instantly:</label>
+            <div class="search-input-wrapper">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="text" id="explorer-search-input" placeholder="Type Section ID (e.g. 3.2), title, or keyword..." class="input-text">
+              <button id="clear-search-btn" class="clear-btn hidden">&times;</button>
+            </div>
+          </div>
+
+          <div class="filter-group">
+            <label>Filter by Type:</label>
+            <div class="type-filter-chips">
+              <button class="chip active" data-type="all">All</button>
+              <button class="chip" data-type="heading">Headings</button>
+              <button class="chip" data-type="table">Tables</button>
+            </div>
+          </div>
+        </div>
+        <div class="filter-summary">
+          <span id="node-count-badge" class="count-badge">0 items</span>
+          <span id="filter-active-label" class="filter-label">Showing all sections</span>
+        </div>
+      </div>
+
+      <!-- Two-column Master-Detail Layout -->
+      <div class="explorer-grid">
+        <!-- Left: Hierarchical Node Tree -->
+        <div class="card tree-card">
+          <div class="tree-header">
+            <h3>Document Hierarchy</h3>
+            <span class="hint-text">Click any section to inspect</span>
+          </div>
+          <div class="tree-scroll-container" id="tree-list-container">
+            <div class="placeholder-msg">Select a document version to view its hierarchy.</div>
+          </div>
+        </div>
+
+        <!-- Right: Detail & Reader Pane -->
+        <div class="card detail-card" id="detail-card">
+          <div id="detail-empty-state" class="empty-state">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+            </svg>
+            <p>Select any section from the hierarchy tree on the left to read its full text, table data, and metadata.</p>
+          </div>
+
+          <div id="detail-content" class="detail-content hidden">
+            <div class="detail-header">
+              <div class="detail-badges">
+                <span class="badge badge-primary" id="detail-key-badge">Node Key</span>
+                <span class="badge badge-type" id="detail-type-badge">Heading</span>
+                <span class="badge badge-page" id="detail-page-badge">Page 1</span>
+                <span class="badge badge-level" id="detail-level-badge">Level 1</span>
+              </div>
+              <h2 id="detail-title">Section Title</h2>
+              <div class="detail-hash-bar">
+                <span class="hash-label">Content Hash:</span>
+                <code id="detail-hash" class="mono">sha256-...</code>
+              </div>
+            </div>
+
+            <div class="detail-body">
+              <h4>Extracted Content</h4>
+              <div id="detail-rendered-content" class="rendered-content"></div>
+            </div>
+
+            <div class="detail-actions">
+              <button class="btn btn-secondary btn-sm" id="generate-from-node-btn">
+                Generate QA Test Case for This Section →
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. VERSION DIFF TAB -->
+    <section class="tab-pane" id="diff-tab">
+      <div class="card diff-setup-card">
+        <div class="card-header">
+          <h2>Semantic Version Comparison</h2>
+          <p>Compare two versions to immediately detect newly added sections, removed specifications, and content changes.</p>
+        </div>
+        <div class="diff-selectors">
+          <div class="form-group">
+            <label for="diff-v1-select">Base Version (From):</label>
+            <select id="diff-v1-select" class="select-dropdown"></select>
+          </div>
+          <div class="diff-arrow">⇄</div>
+          <div class="form-group">
+            <label for="diff-v2-select">Target Version (To):</label>
+            <select id="diff-v2-select" class="select-dropdown"></select>
+          </div>
+          <button id="run-diff-btn" class="btn btn-primary">
+            Compare Versions
+          </button>
+        </div>
+      </div>
+
+      <!-- Diff Results Display -->
+      <div id="diff-results-card" class="card diff-results-card hidden">
+        <div class="diff-summary-badges">
+          <div class="stat-box badge-added">
+            <span class="stat-label">Added Sections</span>
+            <span class="stat-value" id="diff-added-count">0</span>
+          </div>
+          <div class="stat-box badge-changed">
+            <span class="stat-label">Modified Sections</span>
+            <span class="stat-value" id="diff-changed-count">0</span>
+          </div>
+          <div class="stat-box badge-removed">
+            <span class="stat-label">Removed Sections</span>
+            <span class="stat-value" id="diff-removed-count">0</span>
+          </div>
+        </div>
+
+        <div class="diff-details-sections">
+          <div class="diff-group">
+            <h4 class="diff-group-title text-success">+ Added Sections in Target Version</h4>
+            <ul id="diff-added-list" class="diff-item-list"></ul>
+          </div>
+
+          <div class="diff-group">
+            <h4 class="diff-group-title text-warning">~ Modified Sections (Content Hash Changed)</h4>
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Section Key</th>
+                    <th>Section Title</th>
+                    <th>Base Hash</th>
+                    <th>Target Hash</th>
+                  </tr>
+                </thead>
+                <tbody id="diff-changed-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="diff-group">
+            <h4 class="diff-group-title text-danger">- Removed Sections</h4>
+            <ul id="diff-removed-list" class="diff-item-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. QA GENERATION & STALENESS TAB -->
+    <section class="tab-pane" id="qa-tab">
+      <!-- QA Generator Card -->
+      <div class="card">
+        <div class="card-header">
+          <h2>Generate Source-Grounded QA Test Cases</h2>
+          <p>Select a document version and specific sections to draft structured, traceable QA test cases.</p>
+        </div>
+
+        <div class="qa-form-grid">
+          <div class="form-group">
+            <label for="qa-version-select">Document Version:</label>
+            <select id="qa-version-select" class="select-dropdown"></select>
+          </div>
+
+          <div class="form-group">
+            <label for="qa-sections-input">Section Keys (comma separated):</label>
+            <input type="text" id="qa-sections-input" value="3.2, 4.1" placeholder="e.g. 3.2, 4.1, 2.1.1.1" class="input-text">
+            <span class="input-hint">Suggested: <code>3.2</code> (Inflation), <code>4.1</code> (Overpressure), <code>2.1.1.1</code> (Battery)</span>
+          </div>
+
+          <div class="form-group">
+            <label for="qa-count-input">Test Case Count (1-5):</label>
+            <input type="number" id="qa-count-input" value="3" min="1" max="5" class="input-text">
+          </div>
+
+          <div class="form-group button-group">
+            <button id="generate-qa-btn" class="btn btn-primary">
+              <span class="btn-text">Generate QA Test Cases</span>
+              <span class="spinner hidden" id="qa-spinner"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Test Cases List & Staleness Display -->
+      <div class="card">
+        <div class="card-header flex-between flex-wrap gap-md">
+          <div>
+            <h3>Generated QA Test Cases & Staleness Tracking</h3>
+            <p>Test cases are pinned to their source section hash. When a newer version changes the section, the test case is flagged as stale.</p>
+          </div>
+          <div class="filter-controls-mini">
+            <div class="form-group-inline">
+              <label for="filter-qa-version">Version:</label>
+              <select id="filter-qa-version" class="select-dropdown-sm">
+                <option value="all">All Versions</option>
+              </select>
+            </div>
+            <input type="text" id="filter-qa-search" placeholder="Filter title / section..." class="input-text-sm">
+            <label class="checkbox-label"><input type="checkbox" id="filter-stale-only"> Show Stale Only</label>
+            <button id="refresh-qa-btn" class="btn btn-secondary btn-sm" title="Refresh QA Test Cases">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 4v6h-6"></path>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- QA Pagination / Top 5 Counter Bar -->
+        <div id="qa-pagination-bar" class="qa-pagination-bar">
+          <div class="qa-count-info" id="qa-count-info">
+            <!-- Populated dynamically: e.g. Showing top 5 of 45 test cases (40 remaining) -->
+            Showing top 5 test cases
+          </div>
+          <div class="qa-pagination-actions">
+            <button id="qa-toggle-all-btn" class="btn btn-secondary btn-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+              <span id="qa-toggle-all-text">View All</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="qa-cases-container" class="qa-cases-list">
+          <div class="placeholder-msg">Loading test cases...</div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <p>CardioTrack CT-200 Document Intelligence Platform • FastAPI & PyMuPDF Engine</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
