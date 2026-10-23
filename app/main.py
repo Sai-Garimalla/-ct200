@@ -213,6 +213,7 @@ def get_node_by_id(node_id: int, db: Session = Depends(get_db)):
     )
 
 @app.get("/nodes/{node_id}/changes", response_model=NodeChangeSummary)
+@app.get("/nodes/{node_id}/history", response_model=NodeChangeSummary)
 def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
     """Given a node ID, return whether it has changed across versions, with a lightweight diff summary."""
     node = db.get(DocumentNode, node_id)

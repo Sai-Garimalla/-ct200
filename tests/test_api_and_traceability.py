@@ -169,6 +169,11 @@ def test_end_to_end_ingestion_and_traceability():
     assert ch_info["change_type"] == "modified"
     assert "Content modified" in ch_info["diff_summary"]
 
+    # Verify /history alias endpoint
+    hist_3_2 = client.get(f"/nodes/{node_3_2['id']}/history")
+    assert hist_3_2.status_code == 200
+    assert hist_3_2.json()["has_changed"] is True
+
     change_1_1 = client.get(f"/nodes/{node_1_1['id']}/changes")
     assert change_1_1.status_code == 200
     assert change_1_1.json()["has_changed"] is False
