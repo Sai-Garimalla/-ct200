@@ -2,12 +2,8 @@ import json
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-try:
-    from .parser import parse_pdf
-    from ..models import DocumentVersion, DocumentNode, TestCase
-except (ImportError, ValueError):
-    from app.services.parser import parse_pdf  # type: ignore
-    from app.models import DocumentVersion, DocumentNode, TestCase  # type: ignore
+from app.services.parser import parse_pdf
+from app.models import DocumentVersion, DocumentNode, TestCase
 
 def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -> tuple[DocumentVersion, bool]:
     # Ingest a new PDF file. If whole-document content hash matches an existing version,
@@ -106,7 +102,7 @@ def update_all_test_cases_staleness(db: Session, document_key: str, latest_versi
                 tc.stale = False
                 tc.stale_reason = None
 
-from .matcher import match_document_sections
+from app.services.matcher import match_document_sections
 
 def compute_diff(db: Session, from_version_id: int, to_version_id: int) -> dict:
     # Computes section-by-section diff between two versions using matcher service.

@@ -3,12 +3,8 @@ import json
 import logging
 import httpx
 from typing import Sequence
-try:
-    from ..models import DocumentNode
-    from ..schemas import TestCaseDraft, QAGenerationResponse
-except (ImportError, ValueError):
-    from app.models import DocumentNode  # type: ignore
-    from app.schemas import TestCaseDraft, QAGenerationResponse  # type: ignore
+from app.models import DocumentNode
+from app.schemas import TestCaseDraft, QAGenerationResponse
 
 logger = logging.getLogger(__name__)
 
