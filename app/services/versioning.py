@@ -5,8 +5,8 @@ from .parser import parse_pdf
 from ..models import DocumentVersion, DocumentNode, TestCase
 
 def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -> tuple[DocumentVersion, bool]:
-    """Ingest a PDF file, create a new document version if content has changed,
-    persist hierarchical nodes, and update test case staleness."""
+    # Ingest a new PDF file. If whole-document content hash matches an existing version,
+    # return that version without duplicating rows. Otherwise, increment version counter.
     file_hash, parsed_nodes = parse_pdf(path)
     
     # Check if identical version already exists
@@ -18,7 +18,7 @@ def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -
     if existing:
         return existing, False
 
-    # Get latest version number
+    # Monotonically increment version for this document family
     latest_version = db.scalars(
         select(DocumentVersion)
         .where(DocumentVersion.document_key == document_key)
@@ -36,6 +36,7 @@ def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -
     db.add(record)
     db.flush()
 
+    # Store full snapshot of parsed nodes for this version
     for n in parsed_nodes:
         db.add(DocumentNode(
             version_id=record.id,
@@ -50,7 +51,7 @@ def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -
         ))
     db.flush()
 
-    # Update staleness of earlier test cases
+    # Re-evaluate staleness on all historical test cases against this newest version
     update_all_test_cases_staleness(db, document_key=document_key, latest_version_id=record.id)
 
     db.commit()
@@ -58,14 +59,13 @@ def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -
     return record, True
 
 def update_all_test_cases_staleness(db: Session, document_key: str, latest_version_id: int):
-    """Evaluate and update staleness status and reasons for all test cases
-    pinned to prior versions of the given document key."""
+    # Evaluates whether test cases pinned to older revisions are still accurate in the latest version.
     latest_nodes = db.scalars(
         select(DocumentNode).where(DocumentNode.version_id == latest_version_id)
     ).all()
     latest_by_key = {n.node_key: n for n in latest_nodes}
 
-    # Retrieve all test cases for earlier versions of this document
+    # Find prior versions
     prior_versions = db.scalars(
         select(DocumentVersion.id).where(
             DocumentVersion.document_key == document_key,
@@ -82,17 +82,20 @@ def update_all_test_cases_staleness(db: Session, document_key: str, latest_versi
     for tc in test_cases:
         target_node = latest_by_key.get(tc.node_key)
         if target_node is None:
+            # Section was removed or renumbered out of existence in the newest version
             tc.stale = True
             tc.stale_reason = "source_deleted"
         elif target_node.content_hash != tc.selected_hash:
+            # Section text/table has changed
             tc.stale = True
             tc.stale_reason = "source_modified"
         else:
+            # Content is still identical
             tc.stale = False
             tc.stale_reason = None
 
 def compute_diff(db: Session, from_version_id: int, to_version_id: int) -> dict:
-    """Compute detailed logical structural and content diff between two document versions."""
+    # Computes section-by-section diff between two versions using stable node_keys
     from_nodes = db.scalars(select(DocumentNode).where(DocumentNode.version_id == from_version_id)).all()
     to_nodes = db.scalars(select(DocumentNode).where(DocumentNode.version_id == to_version_id)).all()
 

@@ -8,6 +8,7 @@ from ..schemas import TestCaseDraft, QAGenerationResponse
 
 logger = logging.getLogger(__name__)
 
+# Strict prompt forcing exact numerical thresholds and error codes from the text
 SYSTEM_PROMPT = """You are a Quality Assurance Test Engineer specializing in medical device regulatory compliance and software validation.
 Your task is to generate deterministic, rigorous QA test cases based STRICTLY and ONLY on the provided document sections.
 
@@ -30,8 +31,8 @@ Requirements:
 """
 
 def generate_local_grounded_cases(nodes: Sequence[DocumentNode], count: int) -> list[TestCaseDraft]:
-    """Deterministic, high-quality rule-based generator used when no external LLM API key
-    is configured or as an offline fallback. Strictly grounds test cases in actual node text/tables."""
+    # Offline deterministic generator. Used when running tests or evaluation without API keys.
+    # Parses real parameters (pressure thresholds, battery cycles, error codes) directly from the text.
     drafts: list[TestCaseDraft] = []
     
     for idx in range(count):
@@ -40,7 +41,7 @@ def generate_local_grounded_cases(nodes: Sequence[DocumentNode], count: int) -> 
         title = node.title.strip()
         lines = [l.strip() for l in content.splitlines() if l.strip()]
 
-        # Extract quote and context
+        # Pull first line as grounded quote
         quote = lines[0] if lines else title
         if len(quote) > 200:
             quote = quote[:197] + "..."
@@ -103,17 +104,15 @@ def generate_local_grounded_cases(nodes: Sequence[DocumentNode], count: int) -> 
     return drafts
 
 def call_llm_with_retry(nodes: Sequence[DocumentNode], count: int, max_retries: int = 3) -> list[TestCaseDraft]:
-    """Generate structured test cases using configured LLM provider with Pydantic validation
-    and automatic retry logic. Falls back to deterministic generator if no API key is provided."""
+    # Calls OpenAI-compatible LLM endpoint with strict Pydantic validation and a 3-attempt retry loop.
+    # Automatically falls back to local grounded generator if no key is set or if retries fail.
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
     api_base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    # If no LLM credentials are set, use the verified local generator
     if not api_key:
         logger.info("No LLM API key configured in environment; utilizing grounded local QA synthesizer.")
         return generate_local_grounded_cases(nodes, count)
 
-    # Prepare context from selected nodes
     sections_text = "\n\n".join([
         f"--- Section Node Key: {n.node_key} ---\nTitle: {n.title}\nPage: {n.page}\nContent:\n{n.content}"
         for n in nodes
@@ -150,7 +149,7 @@ Remember: Return ONLY valid JSON matching the requested schema with {count} item
                 raw_json = response.json()["choices"][0]["message"]["content"]
                 parsed = json.loads(raw_json)
                 
-                # Strict Pydantic schema validation
+                # Validate against Pydantic schema
                 validated = QAGenerationResponse.model_validate(parsed)
                 if len(validated.test_cases) > 0:
                     return validated.test_cases[:count]
@@ -158,7 +157,6 @@ Remember: Return ONLY valid JSON matching the requested schema with {count} item
         except Exception as e:
             last_error = e
             logger.warning(f"LLM generation attempt {attempt}/{max_retries} failed: {e}")
-            # Add error feedback for retry
             messages.append({"role": "assistant", "content": raw_json if 'raw_json' in locals() else "{}"})
             messages.append({
                 "role": "user",
