@@ -14,36 +14,41 @@ Here is my submission for the **AI Engineering Internship Assignment — CT-200 
 * **GitHub Repository:** https://github.com/Vamsi112-max/ct200-document-intelligence
 * **Approach Document:** https://github.com/Vamsi112-max/ct200-document-intelligence/blob/main/APPROACH.md
 * **Decision Log:** https://github.com/Vamsi112-max/ct200-document-intelligence/blob/main/DECISIONS.md
+* **README:** https://github.com/Vamsi112-max/ct200-document-intelligence/blob/main/README.md
 
 ---
 
 ### Project Summary & Engineering Highlights
 
 1. **Direct PDF Parsing without Markdown Intermediate:**
-   - I worked directly with the raw PDF manuals (`sample_data_ct200_manual.pdf` and `v2`) using PyMuPDF.
+   - Works directly with raw PDF manuals (`sample_data_ct200_manual.pdf` and `v2`) using PyMuPDF.
    - Solved the Page 3 clinical list collision (`1. Normal...`, `2. Elevated...` under Section 3.3) by inspecting font span metadata (point size, bold flags) rather than pure regex.
    - Handled skipped hierarchical levels (e.g. `2.1.1.1` connecting to `2.1`), decomposed embedded Unicode ligatures (`\ufb01` -> `fi`), and extracted structured tables into clean Markdown attached to their parent sections.
 
-2. **Document Versioning & Canonical Whitespace Invariance:**
-   - Ingesting `v2` creates a discrete new revision while preserving `v1`. Content hashes are computed over whitespace-normalized text so that layout and pagination shifts (such as Section 5.3 pushing Section 6 onto new pages) do not trigger false diffs.
+2. **Cross-Version Section Matching (`app/services/matcher.py`):**
+   - Matches sections across document revisions using normalized title similarity (Levenshtein ratio) and token Jaccard content similarity.
+   - Resolves renumbered sections (e.g. Section `2.1` becoming `2.2` when an earlier section is inserted) without losing historical continuity.
+   - Explicitly suppresses false matches between unrelated sections sharing short identical boilerplate text.
 
-3. **Version-Pinned Selection API & Idempotent Generation:**
-   - Implemented `POST /selections` and `GET /selections/{id}` to freeze source text against immutable `version_id`s.
-   - Enforced an explicit duplicate selection policy: idempotent cache retrieval by default (`regenerate=False`) to save token costs and prevent duplicate records, with forced re-generation available when `regenerate=True`.
-
-4. **Subtree Hashing & Automated Staleness Tracking:**
+3. **Parent-Child Content Roll-Up & Subtree Hashing:**
    - Parent headings like `4.2 Error Codes` with empty direct content recursively roll up their child tables (`4.2.table.1`) into `effective_content` and compute `subtree_hash`.
-   - When `v2` is uploaded, older test cases are evaluated against the latest version. Modified sections (`3.2`, `2.1.1.1`, `4.2`, `4.2.table.1`, `4.3`) are flagged with `stale = true` and `stale_reason = "source_modified"`, while untouched sections (`1.1`, `3.1`, `6.1`) remain clean.
+   - Modifying child tables in `v2` properly updates the parent's subtree hash, marking historical test cases as `stale = true` (`source_modified`).
 
-5. **Planted Inconsistencies Auditing & Relational Cross-References:**
-   - Detects the safety-critical timing contradiction between Section 4.1 (2.0s valve vent) and Section 4.2 Table E3 (1.5s auto-deflation in v2).
-   - Catches the foreign vendor anomaly in Section 6.2 citing "Anthropic" for CardioTrack recalibration.
-   - Extracts and validates Section 3.3 cross-references to Sections 2.1 and 4.3 as relational graph edges.
+4. **Generalized Inconsistency Detection & Cross-References:**
+   - Scans arbitrary sections for statements matching `"within N seconds"`, clusters them by target action domain, and detects conflicting operational specifications.
+   - Automatically catches the planted CT-200 contradiction: Section 4.1 specifies emergency valve venting within 2.0s, whereas Section 4.2 Error Codes Table (Row E3) specifies auto-deflation within 1.5s in v2.
+   - Detects the foreign vendor anomaly in Section 6.2 citing "Anthropic" for CardioTrack recalibration.
+   - Captures and validates Section 3.3 cross-references to Sections 2.1 and 4.3 as relational graph edges.
 
-6. **Comprehensive Automated Test Suite (17 Tests Passing):**
-   - Covers parent-child rollup, subtree staleness, planted inconsistencies, cross-references, exact count enforcement, OCR fallback handling, empty PDFs, skipped levels, list collisions, ragged tables, and duplicate headings.
+5. **Version-Pinned Selection API & Strict Count Validation:**
+   - `POST /selections` freezes source text against immutable `version_id`s.
+   - LLM generation validates that the returned test case count *strictly equals* the requested count (`len(test_cases) == count`), retrying with corrective feedback upon mismatch.
+   - Implements an explicit idempotency policy: cache retrieval by default (`regenerate=False`), with forced re-generation available when `regenerate=True`.
 
-The system runs completely offline out-of-the-box (with a deterministic local synthesizer) or with external LLMs via `OPENAI_API_KEY`.
+6. **Automated Test Suite (30 Tests Passing):**
+   - Covers section matching edge cases, generalized timing contradictions, parent-child rollup, subtree staleness, planted inconsistencies, trailing dot preservation, exact count enforcement (1, 3, 5), OCR fallback handling, empty PDFs, skipped levels, and duplicate headings.
+
+The service runs completely offline out-of-the-box (via a deterministic local synthesizer) or with external LLMs (OpenAI, Gemini via OpenAI-compatible endpoint, or Ollama).
 
 I look forward to discussing my architecture, design choices, and trade-offs during the technical walkthrough!
 

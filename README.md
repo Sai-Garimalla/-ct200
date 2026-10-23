@@ -1,6 +1,6 @@
 # CT-200 Document Intelligence & QA Traceability
 
-Backend service built for the Tri9T AI Engineering Internship assignment. It ingests technical and regulatory manuals for the CardioTrack CT-200 blood pressure monitor directly from raw PDF files, extracts a structured hierarchy (sections, subsections, and Markdown tables), tracks document revisions, manages version-pinned selections, and generates source-grounded QA test cases with automated staleness detection.
+Backend service built for the Tri9T AI Engineering Internship assignment. It ingests technical and regulatory manuals for the CardioTrack CT-200 blood pressure monitor directly from raw PDF files, extracts a structured hierarchy (sections, subsections, and Markdown tables), tracks document revisions, aligns sections across versions using a deterministic matcher, manages version-pinned selections, audits specification inconsistencies, and generates source-grounded QA test cases with automated staleness impact detection.
 
 **Author:** Vamsi Inampudi ([@Vamsi112-max](https://github.com/Vamsi112-max))  
 **Tech Stack:** Python 3.10+, FastAPI, SQLAlchemy 2.0, SQLite, Pydantic, PyMuPDF
@@ -17,68 +17,71 @@ Once the server is running locally:
 
 ---
 
-## What This Project Does
+## Core System Architecture & Features
 
-1. **Direct PDF Parsing without Markdown Intermediate:**
-   - Parses `sample_data_ct200_manual.pdf` and `v2` directly using PyMuPDF.
-   - Differentiates real chapter headings from numbered clinical bullet points (`1. Normal...`, `2. Elevated...` under Section 3.3) by inspecting font size and boldness flags.
-   - Converts the General Specifications table (Page 2) and Error Codes table (Page 4) into clean GitHub-style Markdown tables attached to their parent sections.
-   - Normalizes Unicode ligatures (`\ufb01` -> `fi`, `\ufb02` -> `fl`) and standardizes hyphens to prevent terminal encoding crashes and broken searches.
-   - Handles skipped hierarchy levels (`2.1.1.1` cleanly linking to parent `2.1`).
-   - Disambiguates duplicate headings (`1.1` and `1.1#2`) without overwriting records.
-   - Preserves canonical heading punctuation (e.g. `1. Device Overview` retains the trailing dot, while `1.1 Intended Use` retains its dotless sub-header style).
-   - Dynamic font size thresholding: adapts heading detection to the document's median body text font size rather than hardcoding arbitrary point values.
-   - OCR fallback hook: attempts PyMuPDF OCR fallback for pages with little or no extractable text.
+### 1. Direct PDF Parsing (Without Intermediate Markdown)
+- Parses `sample_data_ct200_manual.pdf` and `v2` directly using PyMuPDF.
+- Differentiates real chapter headings from clinical bullet points (`1. Normal...`, `2. Elevated...` under Section 3.3) by inspecting font size and boldness flags.
+- Converts the General Specifications table (Page 2) and Error Codes table (Page 4) into clean GitHub-style Markdown tables attached to parent sections.
+- Decomposes Unicode ligatures (`\ufb01` -> `fi`, `\ufb02` -> `fl`) and standardizes hyphens to prevent terminal encoding crashes.
+- Handles skipped hierarchy levels (`2.1.1.1` cleanly linking to parent `2.1`) via ancestor key backtracking.
+- Disambiguates duplicate headings (`1.1` and `1.1#2`) deterministically.
+- Dynamic font size thresholding: adapts heading detection to the document's median body text font size rather than hardcoding arbitrary point values.
+- OCR fallback hook: attempts PyMuPDF OCR fallback for pages with little or no extractable text (<50 characters).
 
-2. **Parent-Child Content Roll-Up & Subtree Hashing:**
-   - Technical manuals often contain structural headings with zero direct paragraph text (e.g. Section `4.2 Error Codes` immediately followed by child table `4.2.table.1`).
-   - Recursively rolls up child tables and subsections into `effective_content`.
-   - Computes a `subtree_hash` across each section and all its descendants. Selecting parent headings provides full child table context to the test generator, and modifying child tables in v2 properly flags parent test cases as stale.
+### 2. Parent-Child Content Roll-Up & Subtree Hashing
+- Technical manuals often contain structural headings with zero direct text (e.g. Section `4.2 Error Codes` followed immediately by child table `4.2.table.1`).
+- Recursively aggregates descendant tables and paragraphs into `effective_content`.
+- Computes `subtree_hash` across each section and all its descendants. Selecting parent headings provides full child table context to the test generator, and modifying child tables in v2 properly flags parent test cases as stale.
 
-3. **Planted Inconsistencies Auditing & Relational Cross-References:**
-   - `GET /documents/{version_id}/inconsistencies`: Automatically audits the document for safety-critical defects:
-     - Timing contradiction: Section 4.1 specifies emergency venting within 2.0s, while Section 4.2 Error Codes Table (row E3) specifies auto-deflation within 1.5s in v2.
-     - Foreign vendor anomaly: Section 6.2 states "Anthropic recommends professional recalibration...", mistakenly citing an AI company instead of CardioTrack.
-   - `GET /documents/{version_id}/cross-references`: Extracts cited section numbers (such as Section 3.3 citing `2.1, 4.3`) and validates that target sections exist in the document tree.
+### 3. Cross-Version Section Matcher (`app/services/matcher.py`)
+- Aligns sections across revisions using normalized title similarity (Levenshtein ratio) and token Jaccard content similarity.
+- Resolves renumbered sections (e.g., Section `2.1` becoming `2.2` when an earlier section is inserted) by matching titles and body content.
+- Resolves slightly rephrased titles without losing section identity.
+- Explicitly suppresses false matches between unrelated sections sharing short boilerplate text (e.g. "Do not immerse device in water").
+- Classifies sections into `unmodified`, `modified`, `added`, and `removed`.
 
-4. **Document Versioning & Canonical Diffing:**
-   - Ingests new revisions (e.g. `v2`) as new versions while preserving historical snapshots of `v1`.
-   - Computes canonical whitespace-normalized SHA-256 hashes so that layout/pagination shifts (such as Section 5.3 pushing Section 6 onto new pages) do not trigger false diff changes.
-   - Accurately highlights added sections (`5.3 Data Export`), modified sections (`2.1.1.1`, `3.2`, `4.2`, `4.2.table.1`, `4.3`), and unchanged sections.
+### 4. Generalized Inconsistency & Anomaly Detector (`app/services/inconsistency_detector.py`)
+- **Generalized Timing Contradictions:** Scans arbitrary sections for specifications of the form `"within N seconds"`. Clusters actions by domain (e.g., `emergency_deflation`, `display_power_down`, `pump_motor_cutoff`, `data_transmission`), and detects conflicting limits.
+  - Automatically identifies the planted contradiction: Section 4.1 specifies emergency valve venting within 2.0s, whereas Section 4.2 Error Codes Table (Row E3) specifies auto-deflation within 1.5s in v2.
+  - Avoids false contradictions on unrelated actions with different time limits (e.g., 30s display sleep vs. 2.0s valve vent).
+- **Foreign Vendor Anomalies:** Flags unexpected AI vendor citations (Section 6.2 stating *"Anthropic recommends professional recalibration..."* for a CardioTrack device).
+- **Relational Cross-References:** Captures cross-references (such as Section 3.3 referencing `2.1, 4.3`) and validates that destination sections exist in the document tree.
 
-5. **Version-Pinned Selection API:**
-   - `POST /selections` allows users to save named selections referencing specific node+version pairs.
-   - When fetched later, selections resolve the exact version-pinned source text even after newer revisions are uploaded.
+### 5. Version-Pinned Selection API
+- `POST /selections`: Saves named selections referencing specific node+version pairs, freezing the exact source text against immutable `version_id`s.
+- `GET /selections/{id}`: Resolves the frozen text and metadata even after newer document versions are uploaded.
 
-6. **Source-Grounded QA Test Generation:**
-   - Generates structured test cases with title, ordered execution steps, concrete expected results referencing exact numerical limits or error codes, and source quotes.
-   - Validated against strict Pydantic schemas with an automatic 3-attempt retry loop that strictly enforces the exact requested test case count (`len(test_cases) == count`).
-   - Includes a deterministic offline fallback generator that extracts actual numbers, error codes, and pressure thresholds, so the entire pipeline works out-of-the-box without needing an external API key.
-   - **Duplicate Selection Policy:** Returns cached test cases idempotently when `regenerate=False` (saving token costs and keeping IDs stable), with explicit re-generation available when `regenerate=True`.
+### 6. QA Generation & Strict Count Validation (`app/services/qa_generator.py`)
+- Generates structured test cases citing exact numerical limits, error codes, and source quotations.
+- Enforces strict Pydantic schema validation and an automatic 3-attempt retry loop that strictly validates the exact requested test case count (`len(test_cases) == count`).
+- Built-in rule synthesizer provides deterministic offline test generation out-of-the-box without requiring an external LLM API key.
+- **Idempotency Policy:** In `POST /test-cases/generate`, passing `regenerate=False` (default) re-returns existing test cases for that selection to save token spend and preserve test case IDs; passing `regenerate=True` forces re-generation.
 
-7. **Automated Staleness & Impact Detection:**
-   - When a new document version is uploaded, older test cases are evaluated against the newest revision using both direct content hashes and subtree hashes.
-   - Flags modified sections and parent sections with modified child tables as `stale = true` with reason `"source_modified"`, and deleted sections as `"source_deleted"`.
-   - Supports querying test cases by `selection_id`, `node_key`, `node_id`, `version_id`, or `stale=true`.
+### 7. Automated Staleness Impact Detection
+- When `v2` is uploaded, older test cases are evaluated against the latest version using both direct content hashes and subtree hashes.
+- Flags modified sections and parent sections with modified child tables as `stale = true` (`stale_reason = "source_modified"`), and deleted sections as `stale_reason = "source_deleted"`.
 
 ---
 
 ## Setup & Running Locally
 
-### 1. Requirements
+### 1. Prerequisites
 * Python 3.10 or higher
 * pip
 
-### 2. Setup
+### 2. Installation
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/Vamsi112-max/ct200-document-intelligence.git
 cd ct200-document-intelligence
 
-# (Optional) Create a virtual environment
+# Create virtual environment
 python -m venv .venv
-# On Windows:
-.venv\Scripts\activate
+
+# Activate virtual environment
+# On Windows (PowerShell):
+.venv\Scripts\Activate.ps1
 # On Linux/macOS:
 source .venv/bin/activate
 
@@ -86,125 +89,117 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. (Optional) External LLM Configuration
-The project runs offline by default using its built-in rule synthesizer. If you want to use a live LLM:
-```bash
-# Windows PowerShell:
-$env:OPENAI_API_KEY = "your-api-key"
-
-# Linux / macOS:
-export OPENAI_API_KEY="your-api-key"
-```
-
-### 4. Start the API Server
-```bash
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) in your browser.
+*(Note for Windows users: If PowerShell blocks script execution, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` before activating the venv).*
 
 ---
 
-## Testing the v1 → v2 Re-Ingestion & Staleness Flow
+## Environment Variable & LLM Configuration
 
-Here is the exact curl sequence to verify the end-to-end versioning and staleness flow:
+The project includes a documented `.env.example` file.
 
-### 1. Ingest Version 1
+### 1. Default Mode: Built-in Offline Mode (Zero Configuration)
+No environment variables or API keys are required. If `OPENAI_API_KEY` is unset, the application automatically uses its deterministic rule synthesizer, extracting exact pressure thresholds, timings, and error codes directly from the manual text.
+
+### 2. OpenAI Configuration
+```bash
+# Windows PowerShell:
+$env:OPENAI_API_KEY = "sk-your-openai-api-key"
+$env:LLM_MODEL = "gpt-4o-mini"
+$env:OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# Linux / macOS:
+export OPENAI_API_KEY="sk-your-openai-api-key"
+export LLM_MODEL="gpt-4o-mini"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+```
+
+### 3. Google Gemini Configuration (via OpenAI-Compatible Endpoint)
+Gemini does not require a separate SDK. It connects via Google's official OpenAI-compatible endpoint:
+```bash
+# Windows PowerShell:
+$env:OPENAI_API_KEY = "your-gemini-api-key"
+$env:OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+$env:LLM_MODEL = "gemini-1.5-flash"
+```
+
+### 4. Local LLMs (Ollama / vLLM / LM Studio)
+```bash
+$env:OPENAI_BASE_URL = "http://localhost:11434/v1"
+$env:OPENAI_API_KEY = "ollama"
+$env:LLM_MODEL = "llama3.1"
+```
+
+---
+
+## Running the Application
+
+Start the local server:
+```bash
+python -m uvicorn app.main:app --reload --port 8000
+```
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) in your browser for the interactive Swagger UI.
+
+---
+
+## End-to-End Workflow & Example cURL Commands
+
+### 1. Health Probe
+```bash
+curl -X GET "http://127.0.0.1:8000/health"
+```
+
+### 2. Ingest Version 1 PDF
 ```bash
 curl -X POST "http://127.0.0.1:8000/documents/ingest?document_key=ct200" \
-  -F "file=@sample_data_ct200_manual.pdf"
+  -H "accept: application/json" \
+  -F "file=@sample_data_ct200_manual.pdf;type=application/pdf"
 ```
 
-### 2. Browse Top-Level Sections
+### 3. Browse Document Tree
 ```bash
-curl -X GET "http://127.0.0.1:8000/sections/top-level?document_key=ct200"
+curl -X GET "http://127.0.0.1:8000/documents/1/tree"
 ```
 
-### 3. Fetch a Specific Node With Its Immediate Children
-```bash
-# Fetch Chapter 1 to see its full text and children array (1.1, 1.2)
-curl -X GET "http://127.0.0.1:8000/nodes/1"
-```
-
-### 4. Create a Version-Pinned Selection
+### 4. Create Pinned Selection (Freeze Section 3.2 and 1.1)
 ```bash
 curl -X POST "http://127.0.0.1:8000/selections" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "Inflation & Safety Selection",
-    "version_id": 1,
-    "node_keys": ["3.2", "4.1"]
-  }'
+  -d '{"name": "Clinical Validation Set", "version_id": 1, "node_keys": ["3.2", "1.1"]}'
 ```
 
-### 5. Generate QA Test Cases from the Selection
+### 5. Generate QA Test Cases from Selection
 ```bash
 curl -X POST "http://127.0.0.1:8000/test-cases/generate" \
   -H "Content-Type: application/json" \
-  -d '{
-    "selection_id": 1,
-    "count": 2
-  }'
+  -d '{"selection_id": 1, "count": 2, "regenerate": false}'
 ```
 
-### 6. Ingest Version 2 (Triggers Re-Versioning & Staleness Evaluation)
+### 6. Ingest Version 2 PDF (Revision)
 ```bash
 curl -X POST "http://127.0.0.1:8000/documents/ingest?document_key=ct200" \
-  -F "file=@sample_data_ct200_manual_v2.pdf"
+  -H "accept: application/json" \
+  -F "file=@sample_data_ct200_manual_v2.pdf;type=application/pdf"
 ```
 
-### 7. View the Version Diff
+### 7. Compare Version Diff (v1 vs v2)
 ```bash
 curl -X GET "http://127.0.0.1:8000/documents/1/diff/2"
 ```
-*Shows `5.3 Data Export` added, and `3.2`, `2.1.1.1`, `4.2.table.1`, and `4.3` modified.*
 
-### 8. Inspect Node-Level Changes
+### 8. Check Test Case Staleness
 ```bash
-# Check if node 3.2 has changed in the latest version
-curl -X GET "http://127.0.0.1:8000/nodes/13/changes"
-```
-*Returns `has_changed: true` and `change_type: "modified"` with hash diff summary.*
-
-### 9. Query Stale Test Cases
-```bash
-# List all test cases flagged as stale
-curl -X GET "http://127.0.0.1:8000/test-cases?stale=true"
-
-# Inspect detailed staleness diagnostics for test case #1
 curl -X GET "http://127.0.0.1:8000/test-cases/1/staleness"
 ```
 
-### 10. Fetch Test Cases by Selection ID
-```bash
-curl -X GET "http://127.0.0.1:8000/test-cases?selection_id=1"
-```
-
-### 11. Audit Planted Inconsistencies (Timing & Vendor Anomalies)
+### 9. Audit Planted Inconsistencies & Timing Contradictions
 ```bash
 curl -X GET "http://127.0.0.1:8000/documents/2/inconsistencies"
 ```
-*Identifies the 2.0s vs 1.5s emergency venting contradiction between Section 4.1 and Section 4.2 (Row E3), and flags the foreign vendor citation of "Anthropic" in Section 6.2.*
 
-### 12. Query Relational Cross-References
+### 10. Query Relational Cross-References
 ```bash
 curl -X GET "http://127.0.0.1:8000/documents/2/cross-references"
 ```
-*Returns captured graph edges (e.g. Section 3.3 linking to 2.1 and 4.3).*
-
----
-
-## System Limitations & Known Constraints
-
-1. **OCR Limitations for Scanned/Bitmap PDFs:**
-   - The extraction pipeline relies on native PDF text streams and font span dictionaries extracted via PyMuPDF.
-   - An OCR fallback mechanism (`page.get_textpage_ocr`) is integrated for pages with little or no extractable text. However, running OCR requires the underlying Tesseract binary and language data (`tessdata`) to be installed on the host operating system. Without host Tesseract binaries, bitmap-only scanned pages without text layers will yield empty content.
-
-2. **Cross-Version Section Matching by Number:**
-   - Section nodes are aligned across revisions by their structural keys (`node_key`, e.g., `3.2` to `3.2`).
-   - If an author inserts a new section early in a document and shifts subsequent numbers (e.g. `2.2` inserted, shifting `2.2` -> `2.3`), the system evaluates shifted sections as deletions and additions rather than renames. In a full production deployment, this would be augmented with bipartite title/content embedding alignment.
-
-3. **Multi-Column Flow Assumption:**
-   - Page blocks are sorted by their vertical coordinate ($y_0$) across the page width. This functions reliably for standard single-column technical manuals, but pages formatted with multiple parallel text columns require bounding-box clustering to avoid reading horizontally across column gutters.
 
 ---
 
@@ -212,20 +207,25 @@ curl -X GET "http://127.0.0.1:8000/documents/2/cross-references"
 
 Run pytest from the project directory:
 ```bash
-python -m pytest -v
+python -m pytest -q
 ```
 
-All 17 unit, irregularity, and integration tests pass:
-- `tests/test_parser.py`: 6 tests: Heading regexes, Unicode ligature decomposition, whitespace-invariant canonical hashing, full extraction on the real CT-200 PDF, and OCR fallback handler.
-- `tests/test_irregular_pdfs.py`: 5 edge-case PDFs:
-  1. Empty PDF with no text.
-  2. Skipped/jumping numbering hierarchy (`1.0` -> `1.5.3.1`).
-  3. Unnumbered headings with embedded numbered list items.
-  4. Ragged tables with missing columns and `None` cells.
-  5. Duplicate heading numbering and identical titles across parent chapters.
-- `tests/test_inconsistencies_and_rollup.py`: 4 targeted integration tests:
-  1. Parent-child content roll-up on heading 4.2, child table retrieval, and subtree hash staleness evaluation across v1 and v2.
-  2. Planted inconsistencies auditing (4.1 vs 4.2 timing contradiction, 6.2 Anthropic vendor anomaly, and 3.3 cross-reference graph edges).
-  3. Heading trailing dot preservation (e.g. `1. Device Overview`).
-  4. Exact requested test case count validation (verifying exact count enforcement for 1, 3, 5).
-- `tests/test_api_and_traceability.py`: 2 end-to-end integration tests (health check + full lifecycle: Ingest v1 -> browse tree -> top-level sections -> node children -> create selection -> generate cases -> duplicate policy test -> ingest v2 -> version diff -> node change check -> staleness detection -> filtered retrieval).
+**All 30 automated unit, irregularity, and integration tests pass:**
+* `tests/test_matcher_and_generalized_inconsistencies.py` (13 tests):
+  * Section matching: identical titles with modified content, renumbered sections (`2.1` -> `2.2`), title edits, short text boilerplate isolation, empty section disambiguation, Unicode ligature decomposition, additions/deletions.
+  * Generalized inconsistencies: Section 4.1 vs 4.2 contradiction, arbitrary section numbers, custom section titles, unrelated action isolation, multiple timing statements in same section, agreeing specifications.
+* `tests/test_parser.py` (6 tests): Heading regex levels, content-sensitive hashing, ligature normalization, linebreak invariance, real CT-200 PDF parsing, and OCR fallback handler.
+* `tests/test_irregular_pdfs.py` (5 tests): Edge cases for empty PDFs, skipped numbering levels (`1.0` -> `1.5.3.1`), unnumbered list collisions, ragged tables, and duplicate headings.
+* `tests/test_inconsistencies_and_rollup.py` (4 tests): Parent-child rollup and subtree hash staleness on Section 4.2, planted inconsistencies audit, trailing dot preservation, exact test case count validation (1, 3, 5).
+* `tests/test_api_and_traceability.py` (2 tests): Health probe and end-to-end v1 to v2 full lifecycle.
+
+---
+
+## System Limitations & Known Constraints
+
+1. **OCR Host Dependency for Scanned Images:**  
+   The parser uses native PDF text and font spans. While an OCR fallback hook (`page.get_textpage_ocr`) is provided, optical character recognition requires external Tesseract binaries and `tessdata` installed on the host OS. Without host Tesseract binaries, bitmap-only scanned pages without text layers will extract as empty text.
+2. **1-to-1 Section Matching Model:**  
+   The cross-version matcher pairs sections 1-to-1. If a revision splits a single section into multiple subsections, or merges several sections into one, the matcher pairs the closest match and marks the remainder as additions/deletions.
+3. **Multi-Column Text Flow:**  
+   Blocks are sorted vertically ($y_0$) across the page. Documents with multi-column text layouts require bounding-box column clustering to avoid reading horizontally across column gutters.

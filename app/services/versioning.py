@@ -102,43 +102,47 @@ def update_all_test_cases_staleness(db: Session, document_key: str, latest_versi
                 tc.stale = False
                 tc.stale_reason = None
 
+from .matcher import match_document_sections
+
 def compute_diff(db: Session, from_version_id: int, to_version_id: int) -> dict:
-    # Computes section-by-section diff between two versions using stable node_keys.
-    # Incorporates subtree_hash so parent nodes with child changes (like 4.2) are recognized.
+    # Computes section-by-section diff between two versions using matcher service.
+    # Handles renumbered sections, title edits, content modifications, and subtree hashing.
     from_nodes = db.scalars(select(DocumentNode).where(DocumentNode.version_id == from_version_id)).all()
     to_nodes = db.scalars(select(DocumentNode).where(DocumentNode.version_id == to_version_id)).all()
 
     if not from_nodes or not to_nodes:
         return {"error": "One or both document versions not found"}
 
+    report = match_document_sections(from_nodes, to_nodes)
+
+    changed_details = []
+    changed_keys = set()
     from_map = {n.node_key: n for n in from_nodes}
     to_map = {n.node_key: n for n in to_nodes}
 
-    added = sorted(set(to_map.keys()) - set(from_map.keys()))
-    removed = sorted(set(from_map.keys()) - set(to_map.keys()))
-    
-    changed = []
-    changed_details = []
-    for k in sorted(set(from_map.keys()) & set(to_map.keys())):
-        fn = from_map[k]
-        tn = to_map[k]
-        # Detect either direct content change or subtree child changes
-        if fn.content_hash != tn.content_hash or fn.subtree_hash != tn.subtree_hash:
-            changed.append(k)
-            diff_type = "content_modified" if fn.content_hash != tn.content_hash else "subtree_modified"
+    for m in report.matches:
+        if m.is_modified or m.is_renumbered:
+            changed_keys.add(m.from_key)
+            fn = from_map.get(m.from_key)
+            tn = to_map.get(m.to_key)
+            f_hash = (fn.subtree_hash or fn.content_hash) if fn else ""
+            t_hash = (tn.subtree_hash or tn.content_hash) if tn else ""
             changed_details.append({
-                "node_key": k,
-                "title": tn.title,
-                "from_hash": fn.subtree_hash or fn.content_hash,
-                "to_hash": tn.subtree_hash or tn.content_hash,
-                "diff_type": diff_type
+                "node_key": m.from_key,
+                "target_key": m.to_key,
+                "title": m.to_title,
+                "from_hash": f_hash,
+                "to_hash": t_hash,
+                "diff_type": m.match_type,
+                "is_renumbered": m.is_renumbered
             })
 
     return {
         "from_version_id": from_version_id,
         "to_version_id": to_version_id,
-        "added": added,
-        "removed": removed,
-        "changed": changed,
+        "added": report.added_keys,
+        "removed": report.removed_keys,
+        "changed": sorted(list(changed_keys)),
         "changed_details": changed_details
     }
+

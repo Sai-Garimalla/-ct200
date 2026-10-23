@@ -116,7 +116,8 @@ def call_llm_with_retry(nodes: Sequence[DocumentNode], count: int, max_retries: 
     # Calls OpenAI-compatible LLM endpoint with strict Pydantic validation and a 3-attempt retry loop.
     # Automatically falls back to local grounded generator if no key is set or if retries fail.
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
-    api_base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    model_name = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     if not api_key:
         logger.info("No LLM API key configured in environment; utilizing grounded local QA synthesizer.")
@@ -147,7 +148,7 @@ Remember: Return ONLY valid JSON matching the requested schema with {count} item
     for attempt in range(1, max_retries + 1):
         try:
             payload = {
-                "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                "model": model_name,
                 "messages": messages,
                 "response_format": {"type": "json_object"},
                 "temperature": 0.2
