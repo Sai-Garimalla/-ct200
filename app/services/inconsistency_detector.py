@@ -14,9 +14,12 @@ import re
 import json
 import unicodedata
 from dataclasses import dataclass
-from typing import Optional
-from ..models import DocumentNode
-from ..schemas import InconsistencyItem, InconsistencyReport
+try:
+    from ..models import DocumentNode
+    from ..schemas import InconsistencyItem, InconsistencyReport
+except (ImportError, ValueError):
+    from app.models import DocumentNode  # type: ignore
+    from app.schemas import InconsistencyItem, InconsistencyReport  # type: ignore
 
 
 # Stop words to ignore when extracting action keywords from timing clauses

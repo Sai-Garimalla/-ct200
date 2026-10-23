@@ -2,8 +2,12 @@ import json
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from .parser import parse_pdf
-from ..models import DocumentVersion, DocumentNode, TestCase
+try:
+    from .parser import parse_pdf
+    from ..models import DocumentVersion, DocumentNode, TestCase
+except (ImportError, ValueError):
+    from app.services.parser import parse_pdf  # type: ignore
+    from app.models import DocumentVersion, DocumentNode, TestCase  # type: ignore
 
 def ingest(db: Session, path: str, filename: str, document_key: str = "ct200") -> tuple[DocumentVersion, bool]:
     # Ingest a new PDF file. If whole-document content hash matches an existing version,
