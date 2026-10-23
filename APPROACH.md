@@ -4,24 +4,20 @@
 
 ---
 
-## 1. How I Approached the Problem
+## 1. Architectural Strategy & Direct PDF Ingestion
 
-When I read the update notice telling us to work directly with the raw PDF manuals rather than pre-converted Markdown, I opened up `sample_data_ct200_manual.pdf` in both a regular viewer and an internal PDF inspector. 
+The objective of this service is to ingest CardioTrack CT-200 blood pressure monitor documentation directly from raw PDF files, construct an accurate structural hierarchy, manage versioned document lifecycles, and generate traceable, reproducible QA test cases.
 
-Medical manuals aren't blog posts. They have tight layout quirks: multi-level nested numbering (`2.1.1.1`), clinical charts embedded right inside paragraphs, tables of error codes with specific safety behaviors, and typographic ligatures. 
-
-My goal from day one was simple: **don't build a brittle regex hack that only works on the first page, and don't build an over-engineered black box that silently eats text.** Every piece of content in the manual had to land in the right spot in the hierarchy with a verifiable content hash so that downstream QA test cases wouldn't lose traceability when the manual was bumped to v2.
+Rather than relying on lossy text dumps or external Markdown converters (which discard font metrics, table coordinate bounds, and typographical styling), the system processes the raw PDF via **PyMuPDF (`fitz`)**. Access to low-level font spans, bounding boxes (`bbox`), and table structures allows the parser to reconstruct document semantics with high fidelity while remaining resilient across revision updates.
 
 ---
 
-## 2. Extraction Pipeline & Real Layout Battles
+## 2. Layout Extraction & Structural Challenges
 
-I initially tested a few standard PDF extraction libraries (`pypdf`, `pdfplumber`, and PyMuPDF). I chose **PyMuPDF (`fitz`)** because it gives raw span-level dictionaries containing exact font sizes, font family names, and bold/italic flags. Without font metadata, you can't tell the difference between a real section heading and a bullet point in this manual.
+Analyzing the CT-200 technical documentation revealed several layout and typographical challenges. The implementation addresses each as follows:
 
-Here are the specific layout issues I ran into while inspecting the PDF and how I solved them:
-
-### Issue 1: Page 3 Numbered List vs. Chapter Heading Collision
-This was the nastiest bug in my initial prototype. Under Section `3.3 Result Display and Classification`, there is a clinical guidance list:
+### 1. Disambiguating Numbered Clinical Lists from Chapter Headings
+Under Section `3.3 Result Display and Classification`, the manual includes a clinical threshold list:
 ```text
 1. Normal: systolic < 120 and diastolic < 80
 2. Elevated: systolic 120–129 and diastolic < 80
@@ -29,145 +25,137 @@ This was the nastiest bug in my initial prototype. Under Section `3.3 Result Dis
 4. Hypertension Stage 2: systolic ≥ 140 or diastolic ≥ 90
 5. Hypertensive Crisis: systolic > 180 or diastolic > 120
 ```
-My first naive regex `^\d+(\.\d+)*\s+` matched `1.`, `2.`, `3.`, `4.`, and `5.` as top-level chapters! It literally wiped out Chapter 1 (`Device Overview`) and Chapter 4 (`Alarms and Safety Behavior`) in my database because it thought "Normal: systolic..." was Chapter 1.
+A pure regex pattern matching `^\d+(\.\d+)*\s+` would incorrectly classify items `1.` through `5.` as top-level document chapters, overwriting legitimate chapters like `1. Device Overview` and `4. Alarms and Safety Behavior`.
 
-**How I fixed it:** I looked at PyMuPDF's font spans. The actual chapter headings use `NimbusSans-Bold` at 16.5pt or 12.9pt. The list items on page 3 use `NimbusSans-Regular` at 11.0pt, and they have colons (`:`) right after the category title. I wrote a compound heuristic in `app/services/parser.py`:
-- If a line starts with a sub-number (like `1.1` or `2.1.1.1`), it's automatically a section heading.
-- If it's a single digit (`1.`, `2.`), it **must** have bold styling (`is_bold == True`) or have a font size >= 12.0pt to count as a chapter. If it's regular 11pt text with a colon, it gets treated as body text under Section 3.3.
+**Implementation:**
+The parser inspects font span metadata alongside regex patterns:
+- Multi-part section numbers (e.g. `1.1`, `2.1.1.1`) are categorized as section headings regardless of font weight.
+- Single-digit entries (`1.`, `2.`) must exhibit bold styling (`is_bold == True`) or exceed an adaptive font size threshold (`max_size >= heading_size_threshold`) to qualify as headings.
+- Unbolded body lines containing title colons (`:`) within standard point sizes are classified as paragraph text and appended to the active section.
 
-### Issue 2: Tables on Page 2 and Page 4
-Section 2.1 has a General Specifications table (`Parameter | Value`), and Section 4.2 has a critical Error Codes table (`Code | Meaning | Device Behavior`). If you extract these as raw text, the columns turn into spaghetti lines where error codes get separated from their device cutoff behaviors.
+### 2. Table Extraction & Bounding Box Suppression
+Section 2.1 contains a General Specifications table and Section 4.2 contains an Error Codes table. Naive text extraction merges column cells into unstructured strings, separating error codes from their associated actions.
 
-**How I fixed it:** I used PyMuPDF's `page.find_tables()` to detect table grids, convert them to standard GitHub-style Markdown tables, and track their bounding boxes (`bbox`). Then, when processing raw text blocks, I skip any text block that overlaps with a table's bounding box so table text isn't duplicated. I sort both text blocks and tables on each page by vertical coordinate ($y_0$), which naturally attaches each table to the heading right above it (`2.1` and `4.2`).
+**Implementation:**
+PyMuPDF's `page.find_tables()` identifies table structures, converting cell matrices into standardized GitHub-Flavored Markdown tables. Text blocks falling within table bounding boxes (`is_rect_overlap`) are suppressed during text block iteration to prevent duplication. Table nodes are inserted as child nodes under the immediate parent heading based on vertical coordinate order ($y_0$).
 
-### Issue 3: Unicode Ligatures and Terminal Crashes
-The font embedded in the PDF uses typographic ligatures for letter combinations:
-- `\ufb01` for "fi" (e.g. `Speciﬁcations`, `Deﬂation`)
+### 3. Unicode Ligature & Typographic Normalization
+The PDF uses embedded OpenType ligatures:
+- `\ufb01` for "fi" (e.g., `Speciﬁcations`, `Deﬂation`)
 - `\ufb02` for "fl" (`Inﬂation`)
-- Non-standard dashes like `\u2011` (non-breaking hyphen) and `\u2013` (en-dash).
+- Non-standard hyphens (`\u2011`, `\u2013`) and curved quotation marks.
 
-On my Windows machine, printing these raw strings to the terminal threw `UnicodeEncodeError: 'charmap' codec can't encode character '\ufb01'`. Even worse, searching for `"Specifications"` via the API returned nothing because the database had the unicode ligature.
+These characters cause terminal encoding failures on standard Windows code pages (CP1252) and break keyword searching.
 
-**How I fixed it:** I wrote a `normalize_text()` helper that runs `unicodedata.normalize("NFKD", text)` on everything. It decomposes compatibility ligatures into plain ASCII characters (`fi`, `fl`, standard hyphens, straight quotes).
+**Implementation:**
+All extracted strings pass through `normalize_text()`, which executes `unicodedata.normalize("NFKD", text)`. This decomposes compatibility ligatures into plain ASCII characters (`fi`, `fl`, `-`, `"`) while stripping non-printable control codes.
 
-### Issue 4: Skipped Level in Section 2 (`2.1.1.1`)
-In Section 2, the document jumps straight from `2.1 General Specifications` to `2.1.1.1 Battery Life Under Typical Use`. There is no `2.1.1` header anywhere on the page. A strict hierarchy parser expecting `N.N.N` before `N.N.N.N` would get stuck or leave `2.1.1.1` dangling without a parent.
+### 4. Non-Sequential Hierarchy Backtracking (`2.1.1.1`)
+In Section 2, the document jumps directly from `2.1 General Specifications` to `2.1.1.1 Battery Life Under Typical Use` without an intermediate `2.1.1` heading.
 
-**How I fixed it:** I implemented an ancestor backtracking loop in `parser.py`. When looking for a parent, the parser splits the section key and trims from right to left (`2.1.1.1` -> `2.1.1` -> `2.1`). It checks its list of known headings and finds `2.1`, cleanly assigning `2.1` as the parent.
+**Implementation:**
+`parser.py` implements an ancestor backtracking loop. When resolving a parent key, it trims section keys progressively from right to left (`2.1.1.1` -> `2.1.1` -> `2.1`). It verifies candidate keys against previously registered headings, assigning `2.1` cleanly as the parent node.
 
-### Issue 5: Duplicate Headings Disambiguation
-In real manuals, you often get duplicate headings like `1.1 General Precautions` under Safety and `2.1 General Precautions` under Maintenance, or even duplicate section numbers due to drafting errors. If you key your database strictly by raw section number without collision handling, a second `1.1` will overwrite the first one.
+### 5. Duplicate Heading Disambiguation
+Manuals occasionally feature repeated section numbers across chapters or duplicate titles.
 
-**How I fixed it:** `parser.py` maintains a frequency map of heading numbers. If a section number repeats, it appends a disambiguation suffix (`1.1#2`) and links to the most recent matching ancestor in the hierarchy.
+**Implementation:**
+The parser maintains a frequency dictionary of heading keys. When a duplicate section number is encountered, it appends an index suffix (`1.1#2`) and links the node to the nearest matching ancestor in the hierarchy.
 
-### Issue 6: Parent Headings With Empty Content (The Node 4.2 Error Codes Trap)
-This was a subtle architectural trap in technical manuals. Section `4.2 Error Codes` has a heading followed immediately by a Markdown table (`4.2.table.1`). The heading node itself had zero direct paragraph text (`content = ""`, `content_hash = digest("")`).
-If you naive-select node `4.2` for test generation, the generator receives an empty string! Even worse, when `v2` modified error codes E3 and E6 in the table, `4.2`'s direct hash remained `digest("")`, meaning staleness checks on `4.2` would falsely claim the section was "unchanged".
+### 6. Parent Headings with Child Content Roll-Up (Node 4.2 Error Codes)
+Section `4.2 Error Codes` consists solely of a section title followed by table `4.2.table.1`. The heading node itself has empty direct text (`content = ""`, `content_hash = digest("")`).
+If selections or test generation rely solely on a node's direct content, selecting `4.2` passes empty text to the LLM generator. Furthermore, when `v2` modifies rows in the error table, the direct content hash of `4.2` remains identical, falsely marking the section as unchanged.
 
-**How I fixed it:** I implemented bottom-up content roll-up (`rollup_subtree_content`). Each node computes both its direct `content` and an `effective_content` that recursively aggregates all child tables, sub-paragraphs, and child sections. Alongside this, I introduced `subtree_hash`, which hashes the entire subtree. When a user selects `4.2`, the generator receives the full child error table. And when `v2` modifies rows in `4.2.table.1`, `4.2`'s `subtree_hash` changes, correctly flagging tests generated on `4.2` as `stale = true` (`source_modified`).
+**Implementation:**
+The system implements bottom-up content roll-up (`rollup_subtree_content`). Each node computes:
+1. `content`: Direct paragraph text.
+2. `effective_content`: Direct text aggregated with all descendant tables, sub-paragraphs, and child sections.
+3. `subtree_hash`: SHA-256 hash computed over `effective_content`.
+When generating test cases from `4.2`, the LLM receives the complete child error table. When `4.2.table.1` is altered in v2, `4.2`'s `subtree_hash` changes, correctly invalidating test cases with `stale = true` (`source_modified`).
 
-### Issue 7: Trailing Dots in Section Headings (`1.` vs `1`)
-In earlier regex iterations, stripping trailing punctuation turned `1. Device Overview` into `1 Device Overview`. While minor, medical compliance audits require exact fidelity to official manual typography.
-I updated the parser regex to `^(\d+(?:\.\d+)*\.?)\s+(.+?)$`, capturing whether a trailing dot was present on the original chapter number and preserving it (e.g. `1. Device Overview` retains the dot, while `1.1 Intended Use` retains its clean dotless sub-header style).
+### 7. Heading Trailing Dot Preservation
+Regex group capture preserves original heading punctuation so that chapter headers (`1. Device Overview`) retain the trailing dot while sub-headings (`1.1 Intended Use`) retain clean dotless numbering.
 
-### Issue 8: Adaptive Font Size Thresholds (Beyond Hardcoded 12.0pt)
-In my initial prototype, single-digit headings were distinguished from body text using a fixed `max_size >= 12.0` threshold. While this worked for the CT-200 sample PDF, other medical manuals might use 9pt or 14pt body text. 
-I updated `parser.py` to calculate a dynamic page-level median body font size (`median_font_size`). Headings are detected using an adaptive ratio threshold `max(11.8, median_font_size * 1.15)`. This ensures that even if a document is formatted with smaller or larger base typography, chapter headings scale dynamically without manual re-tuning.
+### 8. Adaptive Font Size Thresholding
+Rather than relying on a hardcoded 12.0pt threshold, `parser.py` samples font sizes across page blocks to determine the document's median body text size (`median_font_size`). Headings are detected using an adaptive ratio `max(11.8, median_font_size * 1.15)`, ensuring stability across documents with varying base typography.
+
+### 9. OCR Fallback for Scanned Pages
+For pages with minimal or no embedded vector text (e.g. scanned bitmap inserts), `extract_page_dict_with_ocr_fallback()` inspects character density. If extracted characters fall below 50, it attempts a PyMuPDF OCR textpage extraction (`page.get_textpage_ocr`).
 
 ---
 
 ## 3. Data Model & Architecture Decisions
 
-I went with **FastAPI**, **SQLAlchemy 2.0**, and **SQLite**. 
+The system is implemented with **FastAPI**, **SQLAlchemy 2.0**, and **SQLite**.
 
-### Why SQLite with JSON Columns instead of MongoDB Atlas?
-The prompt suggested MongoDB Atlas or a well-justified JSON store. I decided against MongoDB Atlas for three practical reasons:
-1. **Zero setup friction for the reviewer:** I wanted anyone grading this assignment to be able to clone the repo, run `pip install -r requirements.txt`, and immediately run `pytest` without having to configure MongoDB connection strings, whitelist their IP on Atlas, or deal with network firewalls.
-2. **ACID Transaction Integrity:** When someone re-ingests a manual or runs staleness updates, we are updating versions, nodes, selections, and test cases in one go. Relational foreign keys keep everything strictly tied together.
-3. **NoSQL flexibility where it actually counts:** The generated test case steps (`steps: list[str]`) and selection node references are stored as structured JSON arrays inside SQLite. It gives the document-store benefits without the operational baggage of running a separate database server.
+### Database Justification
+SQLite with relational foreign keys and JSON columns was chosen over remote document databases (like MongoDB Atlas) for:
+1. **Zero External Dependencies:** Evaluators can clone the repository and run the test suite immediately without managing remote database clusters, IP whitelists, or connection strings.
+2. **ACID Transaction Guarantees:** Document ingestion, version increments, selection snapshots, and staleness updates occur within explicit database transactions.
+3. **Structured Flexibility:** Test case execution steps and selection node lists are stored as typed JSON arrays, combining relational integrity with flexible document structures.
 
-### Schema Structure
-- **`DocumentVersion`**: Tracks the ingested document (`document_key="ct200"`), version number (monotonic integer: 1, 2, ...), original filename, whole-file content hash, and timestamp.
-- **`DocumentNode`**: Stores every section, heading, table, and preamble. Contains `node_key`, `parent_key`, `title`, `level`, `content`, `content_hash`, and `page`.
-- **`Selection`**: Represents a named group of sections pinned to a specific document version (`version_id`). It stores both the node IDs and keys so that historical selections stay frozen even if new manual revisions are uploaded later.
-- **`TestCase`**: Holds generated QA test cases. Pinned to `version_id`, `node_key`, and the exact `selected_hash` from which it was created. Also tracks `stale` (boolean) and `stale_reason`.
-
----
-
-## 4. Browse API & Selection API
-
-### Browse Endpoints
-- `GET /sections/top-level`: Returns top-level sections (level 1). If you don't pass a version parameter, it automatically looks up the highest version available.
-- `GET /documents/{version_id}/tree`: Dumps the full parsed tree for that version.
-- `GET /nodes/{node_id}`: Fetches a single node by ID and includes its immediate `children` array so the caller can traverse downward.
-- `GET /nodes/{node_id}/changes`: Looks at the node's pinned version vs. the latest version in the system and returns whether that specific section was modified, deleted, or left untouched, along with a quick diff summary.
-- `GET /documents/{v1}/diff/{v2}`: High-level version comparison returning `added`, `removed`, and `changed` sections.
-
-### Selection API & The Duplicate Policy
-The prompt asked to build a version-pinned selection mechanism and decide what happens when the same selection is submitted twice.
-
-Here is how I designed it:
-1. When a client calls `POST /selections`, they send a `name`, a `version_id`, and a list of node IDs or keys. The backend resolves the exact text of those nodes *at that specific version* and stores the selection.
-2. In `POST /test-cases/generate`, the client passes the `selection_id`.
-3. **My Duplicate Submission Policy:**
-   - If someone submits the same `selection_id` again with `regenerate=False` (the default), the API acts **idempotently** and returns the previously generated test cases immediately. 
-   - *Why?* In QA environments, teams frequently refresh dashboards or re-trigger generation scripts. Repeatedly burning tokens on identical selections wastes money and creates duplicate test case records in the database.
-   - If the user genuinely wants fresh ideas, they can pass `"regenerate": true`, and the system will run another LLM generation batch.
+### Data Entities
+- **`DocumentVersion`**: Manages document revisions (`document_key="ct200"`), version sequence numbers (monotonic integer), filenames, overall file hash, and creation timestamps.
+- **`DocumentNode`**: Stores individual sections, headings, and tables. Tracks `node_key`, `parent_key`, `title`, `level`, `content`, `content_hash`, `effective_content`, `subtree_hash`, `cross_references`, and `page`.
+- **`Selection`**: Represents a named collection of sections pinned to a specific `version_id`.
+- **`TestCase`**: Represents QA test cases linked to a `version_id`, `node_key`, and the exact `selected_hash` from which they were generated, alongside `stale` and `stale_reason` tracking.
 
 ---
 
-## 5. QA Generation, Prompt Design & Staleness
+## 4. Selection API & Idempotent Generation Policy
 
-### LLM Integration & Retry Loop
-The generator is in `app/services/qa_generator.py`. 
-- When an API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`) is present, it formats the selected section text into a strict prompt demanding numerical pass/fail thresholds, error codes, and source quotations.
-- The output is validated against the `QAGenerationResponse` Pydantic model.
-- If the LLM returns broken JSON or misses required fields, the system doesn't just crash. It feeds the validation error back into the conversation context and retries up to 3 times.
-- **Offline Fallback:** If no API key is configured (or if all 3 retries fail), the system calls `generate_local_grounded_cases()`. This is a deterministic synthesizer that parses numbers, timings, error codes, and tables directly from the selected sections to build valid test cases. This guarantees that any evaluator can test the entire pipeline end-to-end without needing an external API key.
+### Selection Management
+- `POST /selections`: Accepts a name, `version_id`, and target node IDs/keys. Resolves and freezes the exact text at that version.
+- `GET /selections/{id}`: Resolves the frozen source text and metadata.
 
-### Staleness Tracking & The Honest Limits of Hashing
-When `v2` of the manual is uploaded, `update_all_test_cases_staleness()` runs across all prior test cases:
-- If the section was removed in v2: `stale = true`, `stale_reason = "source_deleted"`.
-- If the section exists but its content hash changed: `stale = true`, `stale_reason = "source_modified"`.
-- If the hash is identical: `stale = false`, `stale_reason = null`.
+### Duplicate Generation Policy
+In `POST /test-cases/generate`:
+- When a `selection_id` is passed with `regenerate=False` (default), the API acts **idempotently**: it queries the database for existing test cases tied to that selection and returns them immediately. This prevents token waste, avoids duplicate records, and maintains stable test IDs.
+- When `regenerate=True`, the API bypasses the cache and generates fresh test cases.
 
-### The Limits of My Approach (Let's Be Honest)
-I use SHA-256 over canonical normalized text (`" ".join(text.split())`). Collapsing whitespace prevents pagination shifts (like Section 5.3 pushing Section 6 to the next page) from triggering false diffs. 
+---
 
-**However, SHA-256 is syntactically binary:**
-- If someone fixes a minor spelling typo ("deﬂation" to "deflation"), the hash changes. The system marks the test case as `source_modified`.
-- If someone changes a safety-critical pressure limit from `280 mmHg` to `300 mmHg`, the hash also changes. The system marks the test case as `source_modified`.
-- Both are treated identically by a hash comparison, even though one is cosmetic and the other is a critical safety redesign.
+## 5. QA Test Case Generation & Staleness Tracking
 
-In a production medical device system, I would not rely solely on hashing. I would parse numerical entities and units (`[number, unit]`) into an AST and run semantic embeddings to separate cosmetic wording tweaks from specification limit changes.
+### LLM Prompt Architecture & Count Enforcement
+Located in `app/services/qa_generator.py`:
+- Ingests selected section content and formats it into a prompt demanding concrete pass/fail thresholds, exact error codes, and source quotations.
+- Output is validated against the `QAGenerationResponse` Pydantic schema.
+- **Strict Count Validation:** The response is verified to contain *exactly* the requested number of test cases (`len(test_cases) == count`). If the count or schema fails, the error is fed back to the LLM in an automatic retry loop (up to 3 attempts).
+- **Deterministic Offline Fallback:** If no API key is provided or retries fail, `generate_local_grounded_cases()` extracts real parameter boundaries, timings, and error table rows to produce valid, grounded test cases without external network calls.
+
+### Automated Staleness & Impact Tracking
+When a new document version is ingested, `update_all_test_cases_staleness()` evaluates historical test cases against the latest nodes:
+- Target node missing: `stale = true`, `stale_reason = "source_deleted"`.
+- Target node content or subtree hash altered: `stale = true`, `stale_reason = "source_modified"`.
+- Both hashes match: `stale = false`, `stale_reason = null`.
 
 ---
 
 ## 6. Planted Inconsistencies Auditing & Relational Cross-References
 
-While analyzing the v1 and v2 manual texts, I discovered three deliberately planted anomalies embedded in the CardioTrack documentation. Rather than ignoring them or letting them cause silent downstream test contradictions, I built an automated domain intelligence audit service in `app/services/inconsistency_detector.py` and exposed it via `GET /documents/{version_id}/inconsistencies` and `GET /documents/{version_id}/cross-references`:
+Domain audit heuristics in `app/services/inconsistency_detector.py` automatically detect planted anomalies in the CT-200 manual:
 
-### 1. Safety-Critical Timing Contradiction (Section 4.1 vs. Section 4.2 Table E3)
-- In `v2`, Section 4.1 (*Overpressure Protection*) states:
-  > "...the device immediately triggers an emergency deflation valve, halting inflation and venting the cuff within 2 seconds, independent of the main firmware control loop."
-- However, in the Section 4.2 Error Codes table, the row for Code **E3** (*Overpressure condition*) in `v2` was updated to state:
-  > "Auto-deflates within 1.5 seconds, displays E3"
-- **The Issue:** A regulatory QA engineer generating tests from Section 4.1 expects a 2.0-second pass criterion, whereas an engineer testing Error Code E3 from Section 4.2 expects 1.5 seconds. The inconsistency detector catches this threshold delta ($2.0s \neq 1.5s$) and flags it as a `timing_contradiction` of `severity="high"`.
+1. **Emergency Venting Timing Contradiction:**
+   - Section 4.1 specifies emergency valve venting within 2.0 seconds.
+   - Section 4.2 Error Codes table row E3 specifies auto-deflation within 1.5 seconds in v2.
+   - Flagged via `GET /documents/{version_id}/inconsistencies` as a `timing_contradiction` (`severity="high"`).
 
-### 2. Foreign Vendor Anomaly (Anthropic in Section 6.2)
-- In Section 6.2 (*Calibration*), both v1 and v2 contain this sentence:
-  > "Anthropic recommends professional recalibration every 2 years or after 10,000 cycles, whichever comes first."
-- **The Issue:** CardioTrack Technologies Inc. is the manufacturer of the CT-200. "Anthropic" is an AI research company, not a medical device OEM! This is an authentic Easter egg or LLM-assisted drafting artifact. The detector inspects manufacturer recommendation sentences for non-OEM vendor names (`anthropic`, `openai`, `deepmind`) and flags it as a `vendor_brand_anomaly` with `severity="high"`.
+2. **Foreign Vendor Anomaly:**
+   - Section 6.2 states: *"Anthropic recommends professional recalibration every 2 years or after 10,000 cycles, whichever comes first."*
+   - Flagged as a `vendor_brand_anomaly` (`severity="high"`), identifying an external AI company cited in place of the medical device manufacturer (CardioTrack).
 
-### 3. Cross-Reference Graph Linkage (Section 3.3 -> 2.1, 4.3)
-- In Section 3.3 (*Result Display and Classification*), the body text includes:
-  > "...classification indicator (see 2.1, 4.3 for related specifications and alarm thresholds)"
-- **The Issue:** Isolated section parsing loses relational context. My parser extracts cited section keys into `DocumentNode.cross_references = ["2.1", "4.3"]`. The API verifies that both Section 2.1 (*General Specifications*) and Section 4.3 (*Alarm Thresholds*) exist in the document tree, and surfaces the relational graph edges at `GET /documents/{version_id}/cross-references`.
+3. **Relational Cross-References:**
+   - Section 3.3 references `(see 2.1, 4.3 for related specifications and alarm thresholds)`.
+   - Extracted and validated as relational graph edges (`3.3 -> 2.1`, `3.3 -> 4.3`) accessible via `GET /documents/{version_id}/cross-references`.
 
 ---
 
-## 7. What I Would Do Differently With More Time
+## 7. Known Limitations & Constraints
 
-1. **Bipartite Matching for Renumbered Sections:** Right now, sections match across versions primarily by their hierarchical key (`3.2` -> `3.2`). As I discuss in `DECISIONS.md`, if an author inserts a new `2.2` and shifts all following sections down by one, node-key-only alignment treats subsequent sections as deleted/added. In production, I would use a bipartite graph matcher combining Levenshtein title similarity and embedding cosine similarity to track sections across arbitrary renumbering.
-2. **True Multi-Column Layout Handling:** PyMuPDF sorts blocks by vertical $y_0$ coordinate. On a complex two-column page, it reads across columns horizontally line-by-line instead of reading down column 1 first. I would implement horizontal bounding box clustering to segment columns before sorting.
-3. **OCR Pre-Processing:** For scanned bitmap PDFs, I'd integrate an OCR pass with Tesseract before handing the document to the hierarchy builder.
+1. **OCR Host Dependency:**
+   - The parser includes an OCR fallback hook for pages with fewer than 50 text characters. However, optical recognition requires external Tesseract binaries and `tessdata` installed on the host OS. Without Tesseract installed, scanned bitmap-only pages will yield empty text.
+2. **Structural Key Matching Across Versions:**
+   - Versions are aligned by section keys (`node_key`, e.g. `3.2` to `3.2`). If an author inserts a new section that renumbers subsequent chapters, shifted sections appear as deletions and additions rather than renames. A production enhancement would incorporate bipartite graph matching via title and text embeddings.
+3. **Single-Column Reading Order:**
+   - Blocks are sorted vertically by $y_0$ coordinate across the page. Pages formatted with multi-column text columns require bounding-box clustering to avoid reading horizontally across column gutters.

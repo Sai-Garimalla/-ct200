@@ -40,8 +40,8 @@ Here is my submission for the **AI Engineering Internship Assignment — CT-200 
    - Catches the foreign vendor anomaly in Section 6.2 citing "Anthropic" for CardioTrack recalibration.
    - Extracts and validates Section 3.3 cross-references to Sections 2.1 and 4.3 as relational graph edges.
 
-6. **Comprehensive Automated Test Suite (15 Tests Passing):**
-   - Covers parent-child rollup, subtree staleness, planted inconsistencies, cross-references, empty PDFs, skipped levels, list collisions, ragged tables, and duplicate headings.
+6. **Comprehensive Automated Test Suite (17 Tests Passing):**
+   - Covers parent-child rollup, subtree staleness, planted inconsistencies, cross-references, exact count enforcement, OCR fallback handling, empty PDFs, skipped levels, list collisions, ragged tables, and duplicate headings.
 
 The system runs completely offline out-of-the-box (with a deterministic local synthesizer) or with external LLMs via `OPENAI_API_KEY`.
 

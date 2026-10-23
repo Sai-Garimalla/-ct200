@@ -58,3 +58,12 @@ def test_sample_v1_pdf_parsing():
     assert len(table_nodes) >= 2
     assert any("Parameter" in n.content for n in table_nodes)
     assert any("Code" in n.content and "E1" in n.content for n in table_nodes)
+
+def test_ocr_fallback_handler():
+    import pymupdf
+    from app.services.parser import extract_page_dict_with_ocr_fallback
+    doc = pymupdf.open(PDF_V1)
+    page_dict = extract_page_dict_with_ocr_fallback(doc[0])
+    assert "blocks" in page_dict
+    assert len(page_dict["blocks"]) > 0
+

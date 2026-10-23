@@ -160,8 +160,11 @@ Remember: Return ONLY valid JSON matching the requested schema with {count} item
                 
                 # Validate against Pydantic schema
                 validated = QAGenerationResponse.model_validate(parsed)
-                if len(validated.test_cases) > 0:
-                    return validated.test_cases[:count]
+                if len(validated.test_cases) != count:
+                    raise ValueError(
+                        f"Expected exactly {count} test cases, but received {len(validated.test_cases)}."
+                    )
+                return validated.test_cases
 
         except Exception as e:
             last_error = e
@@ -169,7 +172,7 @@ Remember: Return ONLY valid JSON matching the requested schema with {count} item
             messages.append({"role": "assistant", "content": raw_json if 'raw_json' in locals() else "{}"})
             messages.append({
                 "role": "user",
-                "content": f"Your previous response caused validation error: {str(e)}. Please correct the JSON output strictly according to the schema."
+                "content": f"Your previous response caused validation error: {str(e)}. Please correct the JSON output strictly according to the schema with exactly {count} test cases."
             })
 
     logger.warning(f"All {max_retries} LLM attempts failed ({last_error}). Falling back to local grounded generator.")

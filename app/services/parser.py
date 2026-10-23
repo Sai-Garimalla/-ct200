@@ -119,6 +119,27 @@ def rollup_subtree_content(nodes: list[ParsedNode]) -> None:
             n.effective_content = "\n\n".join(accumulated) if accumulated else n.content
             n.subtree_hash = digest(n.effective_content)
 
+def extract_page_dict_with_ocr_fallback(page) -> dict:
+    # Extracts text blocks with font details. If a page has little or no text
+    # (e.g. scanned bitmap image), attempts PyMuPDF OCR fallback if OCR engine is available.
+    page_dict = page.get_text("dict")
+    blocks = page_dict.get("blocks", [])
+    total_chars = sum(
+        len(span.get("text", ""))
+        for b in blocks if "lines" in b
+        for line in b["lines"]
+        for span in line.get("spans", [])
+    )
+    if total_chars < 50:
+        try:
+            tp = page.get_textpage_ocr(dpi=150, full=True)
+            ocr_dict = page.get_text("dict", textpage=tp)
+            if ocr_dict.get("blocks"):
+                return ocr_dict
+        except Exception:
+            pass
+    return page_dict
+
 def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
     # Extracts sections, headings, tables, and paragraphs from the PDF.
     # Disambiguates numbered lists, extracts cross-references, and rolls up child tables.
@@ -155,8 +176,8 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
             if md_table:
                 page_items.append((tab.bbox[1], "table", (tab.bbox, md_table)))
 
-        # 2. Extract text blocks with font span details
-        page_dict = page.get_text("dict")
+        # 2. Extract text blocks with font span details (with OCR fallback for scanned pages)
+        page_dict = extract_page_dict_with_ocr_fallback(page)
         blocks = page_dict.get("blocks", [])
 
         for b in blocks:

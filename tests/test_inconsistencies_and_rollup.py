@@ -144,3 +144,23 @@ def test_heading_trailing_dot_preservation(test_client_and_db):
     node_1 = next((n for n in nodes if n["node_key"] == "1"), None)
     assert node_1 is not None
     assert node_1["title"].startswith("1. ")
+
+def test_exact_requested_test_case_count(test_client_and_db):
+    client, db = test_client_and_db
+    v1_rec, _ = ingest(db, PDF_V1, "ct200_v1.pdf", document_key="ct200")
+
+    for requested_count in [1, 3, 5]:
+        res = client.post("/test-cases/generate", json={
+            "version_id": v1_rec.id,
+            "node_keys": ["2.1"],
+            "count": requested_count
+        })
+        assert res.status_code == 200
+        cases = res.json()
+        assert len(cases) == requested_count
+        for c in cases:
+            assert c["title"]
+            assert len(c["steps"]) >= 2
+            assert c["expected_result"]
+            assert c["node_key"] == "2.1"
+

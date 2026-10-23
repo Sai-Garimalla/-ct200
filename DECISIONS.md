@@ -40,14 +40,13 @@ A bipartite graph matcher that pairs sections across versions using a weighted c
 ### Question 3: Name one input (to your parser, your versioning matcher, or your LLM call) that you did not handle, and what your system does when it sees it.
 
 **My Answer:**  
-Multi-column page layouts (like a 2-column specifications page or side-by-side callout boxes).
+Two specific input edge cases are constrained by current design choices:
 
-**What the system does when it sees it:**  
-In `app/services/parser.py`, I sort all text blocks on a page purely by their vertical coordinate ($y_0$) from top to bottom across the entire page width. 
+1. **Multi-Column Page Layouts:**
+   In `app/services/parser.py`, text blocks are sorted purely by vertical coordinate ($y_0$) from top to bottom across the page width. If fed a multi-column document, the parser reads horizontally across column gutters rather than column-by-column. The resulting text interleaves lines from both columns, producing garbled sentences that downstream LLM validation must reject or retry.
 
-If you feed it a two-column page, it won't read down Column 1 and then down Column 2. Instead, it will read horizontally across both columns line by line. The resulting string is a scrambled mess where sentences from Column 1 are sliced into sentences from Column 2. 
-
-The parser doesn't crash; it hashes the garbled text, stores it with HTTP 200, and sends it directly to the LLM. The LLM then receives nonsensical half-sentences, which either causes Pydantic schema validation to fail or leads to hallucinated test cases.
+2. **Scanned Image-Only PDFs without Host Tesseract:**
+   While `extract_page_dict_with_ocr_fallback()` includes a fallback hook via `page.get_textpage_ocr()`, PyMuPDF relies on the underlying OS having Tesseract binaries and `tessdata` installed. On a system without Tesseract, scanned bitmap pages yield fewer than 50 characters and extract as empty content.
 
 ---
 
