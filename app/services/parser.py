@@ -2,11 +2,11 @@ import re
 import hashlib
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 import pymupdf
 
-# Regex to match numbered headings like "1.", "1.2", "2.1.1.1" with a title
+# Matches section numbering like "1.", "1.2", "2.1.1.1" with optional trailing dot, followed by title
 HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+(.+?)$")
 
 @dataclass
@@ -18,7 +18,10 @@ class ParsedNode:
     level: int
     content: str
     content_hash: str
-    page: int
+    effective_content: str = ""
+    subtree_hash: str = ""
+    cross_references: list[str] = field(default_factory=list)
+    page: int = 1
 
 def normalize_text(text: str) -> str:
     # Decompose ligatures like \ufb01 ("fi") and \ufb02 ("fl").
@@ -32,7 +35,7 @@ def normalize_text(text: str) -> str:
     norm = norm.replace("\u2018", "'").replace("\u2019", "'")
     norm = norm.replace("\u201c", '"').replace("\u201d", '"')
     norm = norm.replace("\u00a0", " ")
-    # Strip weird control characters
+    # Strip non-printable control characters
     norm = "".join(ch for ch in norm if ch == "\n" or unicodedata.category(ch)[0] != "C")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in norm.splitlines()]
     return "\n".join(line for line in lines if line)
@@ -78,9 +81,47 @@ def format_table_as_markdown(table_data: list[list[str | None]]) -> str:
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
 
+def extract_cross_references(text: str) -> list[str]:
+    # Extracts cited section numbers like "(see 2.1, 4.3)" or "see section 4.1"
+    if not text:
+        return []
+    refs: list[str] = []
+    matches = re.findall(r"(?:see\s+(?:sections?\s+)?|\()([0-9]+(?:\.[0-9]+)*(?:\s*,\s*[0-9]+(?:\.[0-9]+)*)*)", text, flags=re.IGNORECASE)
+    for m in matches:
+        for part in m.split(","):
+            cleaned = part.strip().rstrip(".")
+            if cleaned and re.match(r"^[0-9]+(?:\.[0-9]+)*$", cleaned) and cleaned not in refs:
+                refs.append(cleaned)
+    return refs
+
+def rollup_subtree_content(nodes: list[ParsedNode]) -> None:
+    # Aggregates child tables, sub-paragraphs, and child sections into parent headings.
+    # Solves the issue where parent heading 4.2 has empty direct content and misses its child table.
+    # Also computes subtree_hash so staleness flags parents when any child changes.
+    children_map = defaultdict(list)
+    for n in nodes:
+        if n.parent_key:
+            children_map[n.parent_key].append(n)
+
+    # Process nodes bottom-up (higher levels first)
+    sorted_nodes = sorted(nodes, key=lambda x: x.level, reverse=True)
+    
+    for n in sorted_nodes:
+        kids = children_map.get(n.node_key, [])
+        if not kids:
+            n.effective_content = n.content
+            n.subtree_hash = n.content_hash
+        else:
+            accumulated = [n.content] if n.content.strip() else []
+            for k in kids:
+                if k.effective_content.strip():
+                    accumulated.append(k.effective_content.strip())
+            n.effective_content = "\n\n".join(accumulated) if accumulated else n.content
+            n.subtree_hash = digest(n.effective_content)
+
 def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
     # Extracts sections, headings, tables, and paragraphs from the PDF.
-    # Uses font size and boldness flags to avoid mistaking numbered list items for headings.
+    # Disambiguates numbered lists, extracts cross-references, and rolls up child tables.
     doc = pymupdf.open(path)
     nodes: list[ParsedNode] = []
     known_heading_keys: list[str] = []
@@ -89,6 +130,16 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
     
     current_node: ParsedNode | None = None
     accumulated_full_text: list[str] = []
+
+    # First pass: collect font size distribution to compute adaptive relative thresholds
+    all_font_sizes = []
+    for p in doc:
+        for b in p.get_text("dict").get("blocks", []):
+            for l in b.get("lines", []):
+                for s in l.get("spans", []):
+                    all_font_sizes.append(s.get("size", 10.0))
+    median_font_size = sorted(all_font_sizes)[len(all_font_sizes) // 2] if all_font_sizes else 10.0
+    heading_size_threshold = max(11.8, median_font_size * 1.15)
 
     for page_num in range(1, len(doc) + 1):
         page = doc[page_num - 1]
@@ -141,6 +192,9 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                     level=p_level,
                     content=md_table,
                     content_hash=digest(md_table),
+                    effective_content=md_table,
+                    subtree_hash=digest(md_table),
+                    cross_references=extract_cross_references(md_table),
                     page=page_num
                 )
                 nodes.append(table_node)
@@ -164,7 +218,6 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                     flags = s.get("flags", 0)
                     if font_size > max_size:
                         max_size = font_size
-                    # Check for bold flags or font names
                     if "bold" in font_name or (flags & 2 != 0) or (flags & 16 != 0):
                         is_bold = True
 
@@ -179,16 +232,16 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
             is_likely_heading = False
             
             if heading_match:
-                num_part = heading_match.group(1).rstrip(".")
+                raw_num = heading_match.group(1)
+                num_part = raw_num.rstrip(".")
                 title_part = heading_match.group(2).strip()
                 
                 # Multi-level numbers like 1.1, 2.1, 2.1.1.1 are definitely headings
                 if "." in num_part:
                     is_likely_heading = True
-                # Single digit numbers (1., 2.) must be bold or >= 12pt to avoid
-                # treating page 3 clinical lists ('1. Normal: systolic...') as chapter headings!
-                elif is_bold or max_size >= 12.0:
-                    if not (title_part.count(":") >= 1 and not is_bold and max_size < 12.0):
+                # Single digit numbers (1., 2.) must be bold or exceed adaptive heading size
+                elif is_bold or max_size >= heading_size_threshold:
+                    if not (title_part.count(":") >= 1 and not is_bold and max_size < heading_size_threshold):
                         is_likely_heading = True
 
             # Grab document title on page 1
@@ -202,6 +255,9 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                     level=0,
                     content=block_text,
                     content_hash=digest(block_text),
+                    effective_content=block_text,
+                    subtree_hash=digest(block_text),
+                    cross_references=extract_cross_references(block_text),
                     page=page_num
                 )
                 nodes.append(title_node)
@@ -209,9 +265,14 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 continue
 
             if is_likely_heading and heading_match:
-                sec_number = heading_match.group(1).rstrip(".")
+                raw_num = heading_match.group(1)
+                sec_number = raw_num.rstrip(".")
+                has_trailing_dot = raw_num.endswith(".")
                 sec_title = heading_match.group(2).strip()
                 level = sec_number.count(".") + 1
+                
+                # Preserve trailing dot in title if originally present (e.g. "1. Device Overview")
+                formatted_title = f"{sec_number}. {sec_title}" if has_trailing_dot else f"{sec_number} {sec_title}"
                 
                 # Backtrack through known headings to find nearest parent (handles 2.1.1.1 -> 2.1)
                 parent_key = None
@@ -235,11 +296,14 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 new_node = ParsedNode(
                     node_key=final_node_key,
                     parent_key=parent_key,
-                    title=f"{sec_number} {sec_title}",
+                    title=formatted_title,
                     node_type="heading",
                     level=level,
                     content="",
                     content_hash=digest(""),
+                    effective_content="",
+                    subtree_hash=digest(""),
+                    cross_references=[],
                     page=page_num
                 )
                 nodes.append(new_node)
@@ -256,6 +320,9 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                         level=1,
                         content="",
                         content_hash=digest(""),
+                        effective_content="",
+                        subtree_hash=digest(""),
+                        cross_references=[],
                         page=page_num
                     )
                     nodes.append(current_node)
@@ -269,6 +336,15 @@ def parse_pdf(path: str) -> tuple[str, list[ParsedNode]]:
                 else:
                     current_node.content = block_text
                 current_node.content_hash = digest(current_node.content)
+
+                # Extract and merge cross references from paragraph text
+                found_refs = extract_cross_references(block_text)
+                for r in found_refs:
+                    if r not in current_node.cross_references:
+                        current_node.cross_references.append(r)
+
+    # Post-processing pass: rollup child content and compute subtree hashes
+    rollup_subtree_content(nodes)
 
     full_text_str = "\n".join(accumulated_full_text)
     overall_hash = digest(full_text_str) if full_text_str else digest("")

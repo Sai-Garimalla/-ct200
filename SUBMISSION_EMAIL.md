@@ -31,11 +31,17 @@ Here is my submission for the **AI Engineering Internship Assignment — CT-200 
    - Implemented `POST /selections` and `GET /selections/{id}` to freeze source text against immutable `version_id`s.
    - Enforced an explicit duplicate selection policy: idempotent cache retrieval by default (`regenerate=False`) to save token costs and prevent duplicate records, with forced re-generation available when `regenerate=True`.
 
-4. **Automated Staleness & Impact Tracking:**
-   - When `v2` is uploaded, older test cases are evaluated against the latest version. Modified sections (`3.2`, `2.1.1.1`, `4.2.table.1`, `4.3`) are flagged with `stale = true` and `stale_reason = "source_modified"`, while untouched sections (`1.1`, `3.1`, `6.1`) remain clean.
+4. **Subtree Hashing & Automated Staleness Tracking:**
+   - Parent headings like `4.2 Error Codes` with empty direct content recursively roll up their child tables (`4.2.table.1`) into `effective_content` and compute `subtree_hash`.
+   - When `v2` is uploaded, older test cases are evaluated against the latest version. Modified sections (`3.2`, `2.1.1.1`, `4.2`, `4.2.table.1`, `4.3`) are flagged with `stale = true` and `stale_reason = "source_modified"`, while untouched sections (`1.1`, `3.1`, `6.1`) remain clean.
 
-5. **Robust Test Suite (12 Tests Passing):**
-   - Includes 5 explicit irregularity tests covering empty PDFs, skipped levels, list collisions, ragged tables, and duplicate headings, along with an end-to-end integration test verifying the entire lifecycle.
+5. **Planted Inconsistencies Auditing & Relational Cross-References:**
+   - Detects the safety-critical timing contradiction between Section 4.1 (2.0s valve vent) and Section 4.2 Table E3 (1.5s auto-deflation in v2).
+   - Catches the foreign vendor anomaly in Section 6.2 citing "Anthropic" for CardioTrack recalibration.
+   - Extracts and validates Section 3.3 cross-references to Sections 2.1 and 4.3 as relational graph edges.
+
+6. **Comprehensive Automated Test Suite (15 Tests Passing):**
+   - Covers parent-child rollup, subtree staleness, planted inconsistencies, cross-references, empty PDFs, skipped levels, list collisions, ragged tables, and duplicate headings.
 
 The system runs completely offline out-of-the-box (with a deterministic local synthesizer) or with external LLMs via `OPENAI_API_KEY`.
 

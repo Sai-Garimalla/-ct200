@@ -37,16 +37,25 @@ def generate_local_grounded_cases(nodes: Sequence[DocumentNode], count: int) -> 
     
     for idx in range(count):
         node = nodes[idx % len(nodes)]
-        content = node.content.strip()
+        # Use effective_content so parent headings like 4.2 provide their child tables and text
+        content = (getattr(node, "effective_content", None) or node.content or "").strip()
         title = node.title.strip()
         lines = [l.strip() for l in content.splitlines() if l.strip()]
 
-        # Pull first line as grounded quote
-        quote = lines[0] if lines else title
+        # Pull first meaningful line as grounded quote
+        quote = ""
+        for line in lines:
+            if line.startswith("| ---"):
+                continue
+            if line:
+                quote = line
+                break
+        if not quote:
+            quote = title
         if len(quote) > 200:
             quote = quote[:197] + "..."
 
-        if "table" in node.node_type or "Code" in content or "Meaning" in content:
+        if "table" in node.node_type or "Code" in content or "Meaning" in content or "|" in content:
             tc_title = f"Verify Table Specification and Error Handling for {title}"
             steps = [
                 f"Reference documented table in Section '{title}' (Node: {node.node_key}).",
@@ -114,7 +123,7 @@ def call_llm_with_retry(nodes: Sequence[DocumentNode], count: int, max_retries: 
         return generate_local_grounded_cases(nodes, count)
 
     sections_text = "\n\n".join([
-        f"--- Section Node Key: {n.node_key} ---\nTitle: {n.title}\nPage: {n.page}\nContent:\n{n.content}"
+        f"--- Section Node Key: {n.node_key} ---\nTitle: {n.title}\nPage: {n.page}\nContent:\n{(getattr(n, 'effective_content', None) or n.content or '').strip()}"
         for n in nodes
     ])
 

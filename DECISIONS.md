@@ -61,3 +61,13 @@ I chose to store version-pinned selections and enforce **idempotent cache return
 
 #### 6. SQLite with JSON Storage vs Remote MongoDB
 I chose SQLite with SQLAlchemy and JSON array fields instead of spinning up MongoDB Atlas. This guarantees zero network setup friction for whoever is evaluating this submission, provides ACID transaction guarantees when updating staleness across tables, and keeps the entire setup self-contained in a single repo.
+
+#### 7. Bottom-Up Content Roll-Up & Subtree Hashing vs Flat Leaf Nodes
+When a chapter heading like `4.2 Error Codes` has an immediate table (`4.2.table.1`) and no direct paragraph text, a naive node extractor leaves `4.2` with an empty string and a static hash. 
+I chose to compute both `effective_content` (bottom-up aggregation of all descendant tables and subsections) and `subtree_hash`. This ensures that downstream test generators receive rich context when selecting high-level chapters, and test cases pinned to parent headings correctly flag staleness when any nested child row changes in future manual revisions.
+
+#### 8. Automated Anomaly Auditing for Planted Inconsistencies
+Instead of treating PDF text as infallible, I added domain-specific inconsistency checks for the three planted anomalies in the CardioTrack manual:
+1. **Timing Contradiction**: Flags the mismatch between Section 4.1 (2.0s emergency relief venting) and Section 4.2 Table E3 (1.5s auto-deflation).
+2. **Vendor Anomaly**: Flags the presence of "Anthropic" in Section 6.2 calibration recommendations for a CardioTrack device.
+3. **Relational Cross-References**: Extracts cited section links from Section 3.3 (`2.1, 4.3`) into relational graph edges, validating that cited sections actually exist in the manual hierarchy.

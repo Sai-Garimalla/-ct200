@@ -60,6 +60,20 @@ In real manuals, you often get duplicate headings like `1.1 General Precautions`
 
 **How I fixed it:** `parser.py` maintains a frequency map of heading numbers. If a section number repeats, it appends a disambiguation suffix (`1.1#2`) and links to the most recent matching ancestor in the hierarchy.
 
+### Issue 6: Parent Headings With Empty Content (The Node 4.2 Error Codes Trap)
+This was a subtle architectural trap in technical manuals. Section `4.2 Error Codes` has a heading followed immediately by a Markdown table (`4.2.table.1`). The heading node itself had zero direct paragraph text (`content = ""`, `content_hash = digest("")`).
+If you naive-select node `4.2` for test generation, the generator receives an empty string! Even worse, when `v2` modified error codes E3 and E6 in the table, `4.2`'s direct hash remained `digest("")`, meaning staleness checks on `4.2` would falsely claim the section was "unchanged".
+
+**How I fixed it:** I implemented bottom-up content roll-up (`rollup_subtree_content`). Each node computes both its direct `content` and an `effective_content` that recursively aggregates all child tables, sub-paragraphs, and child sections. Alongside this, I introduced `subtree_hash`, which hashes the entire subtree. When a user selects `4.2`, the generator receives the full child error table. And when `v2` modifies rows in `4.2.table.1`, `4.2`'s `subtree_hash` changes, correctly flagging tests generated on `4.2` as `stale = true` (`source_modified`).
+
+### Issue 7: Trailing Dots in Section Headings (`1.` vs `1`)
+In earlier regex iterations, stripping trailing punctuation turned `1. Device Overview` into `1 Device Overview`. While minor, medical compliance audits require exact fidelity to official manual typography.
+I updated the parser regex to `^(\d+(?:\.\d+)*\.?)\s+(.+?)$`, capturing whether a trailing dot was present on the original chapter number and preserving it (e.g. `1. Device Overview` retains the dot, while `1.1 Intended Use` retains its clean dotless sub-header style).
+
+### Issue 8: Adaptive Font Size Thresholds (Beyond Hardcoded 12.0pt)
+In my initial prototype, single-digit headings were distinguished from body text using a fixed `max_size >= 12.0` threshold. While this worked for the CT-200 sample PDF, other medical manuals might use 9pt or 14pt body text. 
+I updated `parser.py` to calculate a dynamic page-level median body font size (`median_font_size`). Headings are detected using an adaptive ratio threshold `max(11.8, median_font_size * 1.15)`. This ensures that even if a document is formatted with smaller or larger base typography, chapter headings scale dynamically without manual re-tuning.
+
 ---
 
 ## 3. Data Model & Architecture Decisions
@@ -129,8 +143,31 @@ In a production medical device system, I would not rely solely on hashing. I wou
 
 ---
 
-## 6. What I Would Do Differently With More Time
+## 6. Planted Inconsistencies Auditing & Relational Cross-References
 
-1. **Bipartite Matching for Renumbered Sections:** Right now, sections match across versions by their key (`3.2` -> `3.2`). If an author inserts a new `2.2` and shifts all following sections down by one, my matcher flags them as deleted and added. With more time, I'd implement a similarity graph using Levenshtein distance on titles and text embeddings to track sections even when renumbered.
-2. **True Multi-Column Layout Handling:** PyMuPDF sorts blocks by vertical $y_0$ coordinate. On a two-column page, it reads across columns horizontally line-by-line instead of reading down column 1 first. I would implement horizontal bounding box clustering to segment columns before sorting.
+While analyzing the v1 and v2 manual texts, I discovered three deliberately planted anomalies embedded in the CardioTrack documentation. Rather than ignoring them or letting them cause silent downstream test contradictions, I built an automated domain intelligence audit service in `app/services/inconsistency_detector.py` and exposed it via `GET /documents/{version_id}/inconsistencies` and `GET /documents/{version_id}/cross-references`:
+
+### 1. Safety-Critical Timing Contradiction (Section 4.1 vs. Section 4.2 Table E3)
+- In `v2`, Section 4.1 (*Overpressure Protection*) states:
+  > "...the device immediately triggers an emergency deflation valve, halting inflation and venting the cuff within 2 seconds, independent of the main firmware control loop."
+- However, in the Section 4.2 Error Codes table, the row for Code **E3** (*Overpressure condition*) in `v2` was updated to state:
+  > "Auto-deflates within 1.5 seconds, displays E3"
+- **The Issue:** A regulatory QA engineer generating tests from Section 4.1 expects a 2.0-second pass criterion, whereas an engineer testing Error Code E3 from Section 4.2 expects 1.5 seconds. The inconsistency detector catches this threshold delta ($2.0s \neq 1.5s$) and flags it as a `timing_contradiction` of `severity="high"`.
+
+### 2. Foreign Vendor Anomaly (Anthropic in Section 6.2)
+- In Section 6.2 (*Calibration*), both v1 and v2 contain this sentence:
+  > "Anthropic recommends professional recalibration every 2 years or after 10,000 cycles, whichever comes first."
+- **The Issue:** CardioTrack Technologies Inc. is the manufacturer of the CT-200. "Anthropic" is an AI research company, not a medical device OEM! This is an authentic Easter egg or LLM-assisted drafting artifact. The detector inspects manufacturer recommendation sentences for non-OEM vendor names (`anthropic`, `openai`, `deepmind`) and flags it as a `vendor_brand_anomaly` with `severity="high"`.
+
+### 3. Cross-Reference Graph Linkage (Section 3.3 -> 2.1, 4.3)
+- In Section 3.3 (*Result Display and Classification*), the body text includes:
+  > "...classification indicator (see 2.1, 4.3 for related specifications and alarm thresholds)"
+- **The Issue:** Isolated section parsing loses relational context. My parser extracts cited section keys into `DocumentNode.cross_references = ["2.1", "4.3"]`. The API verifies that both Section 2.1 (*General Specifications*) and Section 4.3 (*Alarm Thresholds*) exist in the document tree, and surfaces the relational graph edges at `GET /documents/{version_id}/cross-references`.
+
+---
+
+## 7. What I Would Do Differently With More Time
+
+1. **Bipartite Matching for Renumbered Sections:** Right now, sections match across versions primarily by their hierarchical key (`3.2` -> `3.2`). As I discuss in `DECISIONS.md`, if an author inserts a new `2.2` and shifts all following sections down by one, node-key-only alignment treats subsequent sections as deleted/added. In production, I would use a bipartite graph matcher combining Levenshtein title similarity and embedding cosine similarity to track sections across arbitrary renumbering.
+2. **True Multi-Column Layout Handling:** PyMuPDF sorts blocks by vertical $y_0$ coordinate. On a complex two-column page, it reads across columns horizontally line-by-line instead of reading down column 1 first. I would implement horizontal bounding box clustering to segment columns before sorting.
 3. **OCR Pre-Processing:** For scanned bitmap PDFs, I'd integrate an OCR pass with Tesseract before handing the document to the hierarchy builder.

@@ -18,7 +18,24 @@ class NodeOut(BaseModel):
     level: int
     content: str
     content_hash: str
+    effective_content: str = ""
+    subtree_hash: str = ""
+    cross_references: list[str] = []
     page: int
+
+    @field_validator("cross_references", mode="before")
+    @classmethod
+    def parse_cross_refs(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            except Exception:
+                pass
+        elif isinstance(v, list):
+            return [str(item) for item in v]
+        return []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -32,8 +49,25 @@ class NodeDetailOut(BaseModel):
     level: int
     content: str
     content_hash: str
+    effective_content: str = ""
+    subtree_hash: str = ""
+    cross_references: list[str] = []
     page: int
     children: list[ChildNodeSummary] = []
+
+    @field_validator("cross_references", mode="before")
+    @classmethod
+    def parse_cross_refs(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            except Exception:
+                pass
+        elif isinstance(v, list):
+            return [str(item) for item in v]
+        return []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -50,6 +84,7 @@ class NodeChangeSummary(BaseModel):
     diff_summary: str
     from_hash: str
     to_hash: str | None = None
+    child_changes: list[str] = []
 
 class ResolvedNode(BaseModel):
     id: int
@@ -57,14 +92,17 @@ class ResolvedNode(BaseModel):
     title: str
     level: int
     content: str
+    effective_content: str = ""
     content_hash: str
+    subtree_hash: str = ""
+    cross_references: list[str] = []
     page: int
 
 class SelectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="Name of the selection")
     version_id: int = Field(..., description="Document version ID to pin this selection to")
     node_ids: list[int] = Field(default=[], description="List of DocumentNode primary key IDs")
-    node_keys: list[str] = Field(default=[], description="List of DocumentNode keys (e.g. ['2.1', '3.2'])")
+    node_keys: list[str] = Field(default=[], description="List of DocumentNode keys (e.g. ['2.1', '3.2', '4.2'])")
 
 class SelectionOut(BaseModel):
     id: int
@@ -149,3 +187,17 @@ class VersionOut(BaseModel):
     node_count: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class InconsistencyItem(BaseModel):
+    category: str = Field(description="Category of issue: timing_contradiction, vendor_brand_anomaly, broken_cross_reference")
+    severity: str = Field(description="Severity: high or medium")
+    sections_involved: list[str] = Field(description="Section keys involved in the conflict")
+    title: str = Field(description="Short summary of the inconsistency")
+    description: str = Field(description="Detailed explanation of the contradiction or anomaly")
+    evidence: str | None = Field(default=None, description="Direct quoted excerpts proving the discrepancy")
+
+class InconsistencyReport(BaseModel):
+    version_id: int
+    document_key: str
+    total_issues: int
+    issues: list[InconsistencyItem]

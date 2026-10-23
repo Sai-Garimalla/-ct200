@@ -22,10 +22,13 @@ from .schemas import (
     TestCaseOut,
     GenerateRequest,
     DiffOut,
-    VersionOut
+    VersionOut,
+    InconsistencyItem,
+    InconsistencyReport
 )
 from .services.versioning import ingest, compute_diff
 from .services.qa_generator import call_llm_with_retry
+from .services.inconsistency_detector import detect_document_inconsistencies
 
 Base.metadata.create_all(bind=engine)
 
@@ -208,6 +211,9 @@ def get_node_by_id(node_id: int, db: Session = Depends(get_db)):
         level=node.level,
         content=node.content,
         content_hash=node.content_hash,
+        effective_content=node.effective_content,
+        subtree_hash=node.subtree_hash,
+        cross_references=json.loads(node.cross_references) if node.cross_references else [],
         page=node.page,
         children=child_summaries
     )
@@ -227,6 +233,7 @@ def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
         .order_by(DocumentVersion.version.desc())
     ).first()
 
+    node_hash = node.subtree_hash or node.content_hash
     if latest_version.id == pinned_version.id:
         return NodeChangeSummary(
             node_id=node.id,
@@ -239,8 +246,8 @@ def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
             has_changed=False,
             change_type="unchanged",
             diff_summary="This node belongs to the latest version of the document.",
-            from_hash=node.content_hash,
-            to_hash=node.content_hash
+            from_hash=node_hash,
+            to_hash=node_hash
         )
 
     latest_node = db.scalars(
@@ -262,11 +269,12 @@ def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
             has_changed=True,
             change_type="deleted_in_latest",
             diff_summary=f"Section '{node.node_key}' was deleted or renumbered in version {latest_version.version}.",
-            from_hash=node.content_hash,
+            from_hash=node_hash,
             to_hash=None
         )
 
-    if latest_node.content_hash == node.content_hash:
+    latest_hash = latest_node.subtree_hash or latest_node.content_hash
+    if latest_node.content_hash == node.content_hash and latest_node.subtree_hash == node.subtree_hash:
         return NodeChangeSummary(
             node_id=node.id,
             node_key=node.node_key,
@@ -277,10 +285,17 @@ def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
             latest_version=latest_version.version,
             has_changed=False,
             change_type="unchanged",
-            diff_summary=f"Section content is identical between version {pinned_version.version} and version {latest_version.version}.",
-            from_hash=node.content_hash,
-            to_hash=latest_node.content_hash
+            diff_summary=f"Section content and child elements are identical between version {pinned_version.version} and version {latest_version.version}.",
+            from_hash=node_hash,
+            to_hash=latest_hash
         )
+
+    change_label = "modified" if latest_node.content_hash != node.content_hash else "child_content_modified"
+    diff_desc = (
+        f"Content modified between version {pinned_version.version} and version {latest_version.version} (hash {node.content_hash[:8]}... -> {latest_node.content_hash[:8]}...)."
+        if latest_node.content_hash != node.content_hash
+        else f"Subtree child content (tables/subsections) modified between version {pinned_version.version} and version {latest_version.version}."
+    )
 
     return NodeChangeSummary(
         node_id=node.id,
@@ -291,10 +306,10 @@ def check_node_version_change(node_id: int, db: Session = Depends(get_db)):
         latest_version_id=latest_version.id,
         latest_version=latest_version.version,
         has_changed=True,
-        change_type="modified",
-        diff_summary=f"Content modified between version {pinned_version.version} and version {latest_version.version} (hash {node.content_hash[:8]}... -> {latest_node.content_hash[:8]}...).",
-        from_hash=node.content_hash,
-        to_hash=latest_node.content_hash
+        change_type=change_label,
+        diff_summary=diff_desc,
+        from_hash=node_hash,
+        to_hash=latest_hash
     )
 
 @app.get("/documents/{version_id}/nodes/{node_key}", response_model=NodeOut)
@@ -397,7 +412,10 @@ def create_selection(req: SelectionCreate, db: Session = Depends(get_db)):
             title=n.title,
             level=n.level,
             content=n.content,
+            effective_content=n.effective_content,
             content_hash=n.content_hash,
+            subtree_hash=n.subtree_hash,
+            cross_references=json.loads(n.cross_references) if n.cross_references else [],
             page=n.page
         )
         for n in resolved_nodes
@@ -443,7 +461,10 @@ def list_selections(
                     title=n.title,
                     level=n.level,
                     content=n.content,
+                    effective_content=n.effective_content,
                     content_hash=n.content_hash,
+                    subtree_hash=n.subtree_hash,
+                    cross_references=json.loads(n.cross_references) if n.cross_references else [],
                     page=n.page
                 )
                 for n in resolved
@@ -476,7 +497,10 @@ def get_selection(selection_id: int, db: Session = Depends(get_db)):
                 title=n.title,
                 level=n.level,
                 content=n.content,
+                effective_content=n.effective_content,
                 content_hash=n.content_hash,
+                subtree_hash=n.subtree_hash,
+                cross_references=json.loads(n.cross_references) if n.cross_references else [],
                 page=n.page
             )
             for n in resolved
@@ -540,11 +564,13 @@ def generate_test_cases(req: GenerateRequest, db: Session = Depends(get_db)):
     created_cases = []
     for draft in drafts:
         matched_node = nodes_by_key.get(draft.source_node_key, chosen_nodes[0])
+        # Pin hash to subtree_hash so parent nodes with child changes trigger staleness
+        hash_to_pin = matched_node.subtree_hash or matched_node.content_hash
         case_rec = TestCase(
             version_id=target_version_id,
             selection_id=active_selection_id,
             node_key=matched_node.node_key,
-            selected_hash=matched_node.content_hash,
+            selected_hash=hash_to_pin,
             title=draft.title,
             steps=json.dumps(draft.steps),
             expected_result=draft.expected_result,
@@ -626,9 +652,12 @@ def evaluate_test_case_staleness(case_id: int, db: Session = Depends(get_db)):
     if latest_node is None:
         is_stale = True
         reason = "source_deleted"
-    elif latest_node.content_hash != case.selected_hash:
-        is_stale = True
-        reason = "source_modified"
+    else:
+        # Check both direct content hash and subtree hash
+        current_hashes = {latest_node.content_hash, latest_node.subtree_hash}
+        if case.selected_hash not in current_hashes:
+            is_stale = True
+            reason = "source_modified"
 
     return {
         "test_case_id": case.id,
@@ -639,7 +668,52 @@ def evaluate_test_case_staleness(case_id: int, db: Session = Depends(get_db)):
         "latest_version": latest_version.version,
         "node_key": case.node_key,
         "selected_hash": case.selected_hash,
-        "latest_node_hash": latest_node.content_hash if latest_node else None,
+        "latest_node_hash": latest_node.subtree_hash or latest_node.content_hash if latest_node else None,
         "stale": is_stale,
         "stale_reason": reason
     }
+
+# ============================================================================
+# Document Inconsistency & Relational Cross-References API
+# ============================================================================
+
+@app.get("/documents/{version_id}/inconsistencies", response_model=InconsistencyReport)
+def get_document_inconsistencies(version_id: int, db: Session = Depends(get_db)):
+    """Audits a document version for planted contradictions, vendor anomalies,
+    and cross-reference linkage (e.g. 4.1 vs 4.2 timing, Anthropic in 6.2, 3.3 cross-references)."""
+    version = db.get(DocumentVersion, version_id)
+    if not version:
+        raise HTTPException(status_code=404, detail="Document version not found")
+    nodes = db.scalars(
+        select(DocumentNode).where(DocumentNode.version_id == version_id).order_by(DocumentNode.id)
+    ).all()
+    return detect_document_inconsistencies(version_id=version.id, document_key=version.document_key, nodes=nodes)
+
+@app.get("/documents/{version_id}/cross-references")
+def get_cross_references(version_id: int, db: Session = Depends(get_db)):
+    """Returns captured cross-reference links and graph edges across sections in the document."""
+    version = db.get(DocumentVersion, version_id)
+    if not version:
+        raise HTTPException(status_code=404, detail="Document version not found")
+    nodes = db.scalars(
+        select(DocumentNode).where(DocumentNode.version_id == version_id)
+    ).all()
+    nodes_by_key = {n.node_key: n for n in nodes}
+    edges = []
+    for n in nodes:
+        if n.cross_references:
+            try:
+                refs = json.loads(n.cross_references) if isinstance(n.cross_references, str) else n.cross_references
+            except Exception:
+                refs = []
+            for r in refs:
+                target = nodes_by_key.get(r)
+                edges.append({
+                    "source_node_key": n.node_key,
+                    "source_title": n.title,
+                    "target_node_key": r,
+                    "target_title": target.title if target else None,
+                    "is_resolved": target is not None
+                })
+    return {"version_id": version_id, "document_key": version.document_key, "total_edges": len(edges), "edges": edges}
+

@@ -35,6 +35,9 @@ class DocumentNode(Base):
     level: Mapped[int] = mapped_column(Integer, default=0)
     content: Mapped[str] = mapped_column(Text, default="")
     content_hash: Mapped[str] = mapped_column(String(64))
+    effective_content: Mapped[str] = mapped_column(Text, default="")  # rolled-up content including child tables/sections
+    subtree_hash: Mapped[str] = mapped_column(String(64), default="") # hash over direct content + all descendant children
+    cross_references: Mapped[str] = mapped_column(Text, default="[]") # JSON list of cited section keys (e.g. ['2.1', '4.3'])
     page: Mapped[int] = mapped_column(Integer, default=1)
     version_record: Mapped[DocumentVersion] = relationship(back_populates="nodes")
 
